@@ -1,0 +1,7 @@
+# 빌드 산출물
+build/
+
+# Visual Studio / 에디터 임시 파일
+.vs/
+*.user
+*.suo

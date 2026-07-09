@@ -1,0 +1,469 @@
+// =============================================================
+// MidiPro - vst/Vst3Host.cpp
+// VST3 SDK를 이용한 최소 호스트 구현. SDK 의존은 전부 여기 안에.
+// =============================================================
+
+#include "vst/Vst3Host.h"
+
+#include "public.sdk/source/common/memorystream.h"
+#include "public.sdk/source/vst/hosting/eventlist.h"
+#include "public.sdk/source/vst/hosting/hostclasses.h"
+#include "public.sdk/source/vst/hosting/module.h"
+#include "public.sdk/source/vst/hosting/parameterchanges.h"
+
+#include "pluginterfaces/base/funknownimpl.h"
+#include "pluginterfaces/gui/iplugview.h"
+#include "pluginterfaces/vst/ivstaudioprocessor.h"
+#include "pluginterfaces/vst/ivstcomponent.h"
+#include "pluginterfaces/vst/ivsteditcontroller.h"
+#include "pluginterfaces/vst/ivstevents.h"
+#include "pluginterfaces/vst/ivstmidicontrollers.h"
+#include "pluginterfaces/vst/ivstprocesscontext.h"
+#include "pluginterfaces/vst/vsttypes.h"
+
+#include <windows.h>
+
+#include <algorithm>
+#include <array>
+
+using namespace Steinberg;
+using namespace Steinberg::Vst;
+
+namespace midipro::vst {
+
+namespace {
+// 스테레오 스피커 배치 (L|R). SpeakerArr 상수 대신 명시적으로 둔다.
+constexpr uint64 kStereoArr = 0x3;
+constexpr wchar_t kEditorWndClass[] = L"MidiProVstEditor";
+} // namespace
+
+// 플러그인이 에디터 리사이즈를 요청할 때 호스트 창을 맞춰주는 최소 프레임.
+class HostPlugFrame : public U::Implements<U::Directly<IPlugFrame>> {
+public:
+    explicit HostPlugFrame(HWND wnd) : m_wnd(wnd) {}
+    tresult PLUGIN_API resizeView(IPlugView* view, ViewRect* rect) override {
+        if (!rect || !m_wnd) return kResultFalse;
+        RECT r = {0, 0, rect->getWidth(), rect->getHeight()};
+        AdjustWindowRect(&r, GetWindowLong(m_wnd, GWL_STYLE), FALSE);
+        SetWindowPos(m_wnd, nullptr, 0, 0, r.right - r.left, r.bottom - r.top,
+                     SWP_NOMOVE | SWP_NOZORDER);
+        if (view) view->onSize(rect);
+        return kResultTrue;
+    }
+
+private:
+    HWND m_wnd = nullptr;
+};
+
+struct Vst3Host::Impl {
+    VST3::Hosting::Module::Ptr module;
+    std::string path;
+    std::vector<PluginClass> classes;
+
+    IPtr<IHostApplication> hostContext;
+    IPtr<IComponent> component;
+    IPtr<IAudioProcessor> processor;
+    IPtr<IEditController> controller;
+    IPtr<IMidiMapping> midiMapping;
+
+    // 채널별(0~15) 표현 컨트롤러 -> 파라미터 ID 캐시.
+    // 0=피치벤드, 1=애프터터치, 2=음색(CC74). 매핑 없으면 kNoParamId.
+    static constexpr int kBend = 0, kAfter = 1, kTimbre = 2;
+    ParamID exprParam[16][3];
+
+    bool loaded = false;
+    bool instrument = false;
+    bool hasAudioInput = false;
+    std::string name;
+    double sampleRate = 44100.0;
+    int maxBlock = 512;
+
+    // 오디오 스레드 처리용 (사전 준비)
+    EventList eventList{256};
+    ParameterChanges inParams;
+    ParameterChanges outParams;
+    ProcessData data;
+    AudioBusBuffers inBus;
+    AudioBusBuffers outBus;
+    ProcessContext ctx{};
+    std::array<float*, 2> inPtrs{nullptr, nullptr};
+    std::array<float*, 2> outPtrs{nullptr, nullptr};
+
+    // 에디터
+    IPtr<IPlugView> view;
+    std::unique_ptr<HostPlugFrame> frame;
+    HWND editorWnd = nullptr;
+
+    void addExpression(int ch, int which, float value01);
+
+    void teardownEditor() {
+        if (view) {
+            view->setFrame(nullptr);
+            view->removed();
+            view = nullptr;
+        }
+        frame.reset();
+        if (editorWnd) {
+            DestroyWindow(editorWnd);
+            editorWnd = nullptr;
+        }
+    }
+
+    void teardownPlugin() {
+        teardownEditor();
+        if (processor) processor->setProcessing(false);
+        if (component) component->setActive(false);
+        // 컴포넌트/컨트롤러 연결 해제
+        if (component && controller) {
+            if (auto compICP = U::cast<IConnectionPoint>(component))
+                if (auto ctrlICP = U::cast<IConnectionPoint>(controller)) {
+                    compICP->disconnect(ctrlICP);
+                    ctrlICP->disconnect(compICP);
+                }
+        }
+        midiMapping = nullptr;
+        if (controller) {
+            controller->terminate();
+            controller = nullptr;
+        }
+        if (component) {
+            component->terminate();
+            component = nullptr;
+        }
+        processor = nullptr;
+        loaded = false;
+    }
+};
+
+Vst3Host::Vst3Host() : m_impl(std::make_unique<Impl>()) {}
+Vst3Host::~Vst3Host() { unload(); }
+
+bool Vst3Host::loadModule(const std::string& path, std::string& err) {
+    unload();
+    auto module = VST3::Hosting::Module::create(path, err);
+    if (!module) return false;
+
+    m_impl->module = module;
+    m_impl->path = path;
+    m_impl->classes.clear();
+
+    for (const auto& ci : module->getFactory().classInfos()) {
+        if (ci.category() != kVstAudioEffectClass) continue; // "Audio Module Class"
+        PluginClass pc;
+        pc.name = ci.name();
+        const auto sub = ci.subCategoriesString();
+        pc.isInstrument = sub.find("Instrument") != std::string::npos;
+        pc.isEffect = !pc.isInstrument;
+        m_impl->classes.push_back(pc);
+    }
+    return true;
+}
+
+const std::vector<PluginClass>& Vst3Host::classes() const { return m_impl->classes; }
+std::string Vst3Host::modulePath() const { return m_impl->path; }
+
+bool Vst3Host::instantiate(int classIndex, double sampleRate, int maxBlockSize, std::string& err) {
+    if (!m_impl->module) {
+        err = "모듈이 로드되지 않음";
+        return false;
+    }
+    m_impl->teardownPlugin();
+
+    const auto& factory = m_impl->module->getFactory();
+    const auto infos = factory.classInfos();
+    // classes[] 는 오디오 모듈만 걸러낸 목록이므로 인덱스를 원본으로 환산
+    std::vector<VST3::Hosting::ClassInfo> audioInfos;
+    for (const auto& ci : infos)
+        if (ci.category() == kVstAudioEffectClass) audioInfos.push_back(ci);
+    if (classIndex < 0 || classIndex >= (int)audioInfos.size()) {
+        err = "잘못된 클래스 인덱스";
+        return false;
+    }
+    const auto& info = audioInfos[classIndex];
+
+    if (!m_impl->hostContext)
+        m_impl->hostContext = owned(new HostApplication());
+
+    m_impl->component = factory.createInstance<IComponent>(info.ID());
+    if (!m_impl->component) {
+        err = "컴포넌트 생성 실패";
+        return false;
+    }
+    if (m_impl->component->initialize(m_impl->hostContext) != kResultOk) {
+        err = "컴포넌트 초기화 실패";
+        m_impl->teardownPlugin();
+        return false;
+    }
+
+    m_impl->processor = U::cast<IAudioProcessor>(m_impl->component);
+    if (!m_impl->processor) {
+        err = "IAudioProcessor 없음";
+        m_impl->teardownPlugin();
+        return false;
+    }
+
+    // 컨트롤러: 컴포넌트가 겸하거나 별도 클래스
+    TUID cid;
+    if (m_impl->component->getControllerClassId(cid) == kResultOk) {
+        m_impl->controller = factory.createInstance<IEditController>(VST3::UID(cid));
+    }
+    if (!m_impl->controller)
+        m_impl->controller = U::cast<IEditController>(m_impl->component);
+    if (m_impl->controller && m_impl->controller.get() != (IEditController*)m_impl->component.get())
+        m_impl->controller->initialize(m_impl->hostContext);
+
+    // 컴포넌트 <-> 컨트롤러 연결 + 상태 전달
+    if (m_impl->controller) {
+        if (auto compICP = U::cast<IConnectionPoint>(m_impl->component))
+            if (auto ctrlICP = U::cast<IConnectionPoint>(m_impl->controller)) {
+                compICP->connect(ctrlICP);
+                ctrlICP->connect(compICP);
+            }
+        MemoryStream stream;
+        if (m_impl->component->getState(&stream) == kResultOk) {
+            stream.seek(0, IBStream::kIBSeekSet, nullptr);
+            m_impl->controller->setComponentState(&stream);
+        }
+    }
+
+    // MPE 표현 매핑 캐시: 채널별로 피치벤드/애프터터치/CC74가 어떤
+    // 파라미터에 연결되는지 미리 조회해 둔다 (오디오 스레드에서 재조회 방지).
+    for (int ch = 0; ch < 16; ++ch)
+        for (int k = 0; k < 3; ++k) m_impl->exprParam[ch][k] = kNoParamId;
+    m_impl->midiMapping = U::cast<IMidiMapping>(m_impl->controller);
+    if (m_impl->midiMapping) {
+        const int16 ctrlNum[3] = {kPitchBend, kAfterTouch, kCtrlFilterResonance /*CC74*/};
+        for (int ch = 0; ch < 16; ++ch)
+            for (int k = 0; k < 3; ++k) {
+                ParamID id = kNoParamId;
+                if (m_impl->midiMapping->getMidiControllerAssignment(
+                        0, (int16)ch, (CtrlNumber)ctrlNum[k], id) == kResultTrue)
+                    m_impl->exprParam[ch][k] = id;
+            }
+    }
+
+    // 버스 구성
+    const bool hasAudioIn = m_impl->component->getBusCount(kAudio, kInput) > 0;
+    const bool hasAudioOut = m_impl->component->getBusCount(kAudio, kOutput) > 0;
+    const bool hasEventIn = m_impl->component->getBusCount(kEvent, kInput) > 0;
+    m_impl->hasAudioInput = hasAudioIn;
+    m_impl->instrument = hasEventIn; // 이벤트 입력이 있으면 악기로 취급
+
+    if (hasAudioIn) m_impl->component->activateBus(kAudio, kInput, 0, true);
+    if (hasAudioOut) m_impl->component->activateBus(kAudio, kOutput, 0, true);
+    if (hasEventIn) m_impl->component->activateBus(kEvent, kInput, 0, true);
+
+    SpeakerArrangement out = kStereoArr;
+    SpeakerArrangement in = kStereoArr;
+    if (hasAudioIn)
+        m_impl->processor->setBusArrangements(&in, 1, &out, 1);
+    else
+        m_impl->processor->setBusArrangements(nullptr, 0, &out, 1);
+
+    ProcessSetup setup{};
+    setup.processMode = kRealtime;
+    setup.symbolicSampleSize = kSample32;
+    setup.maxSamplesPerBlock = maxBlockSize;
+    setup.sampleRate = sampleRate;
+    if (m_impl->processor->setupProcessing(setup) != kResultOk) {
+        err = "setupProcessing 실패";
+        m_impl->teardownPlugin();
+        return false;
+    }
+
+    m_impl->component->setActive(true);
+    m_impl->processor->setProcessing(true);
+
+    // ProcessData 사전 구성 (Rule 3: 콜백에서 재할당 없음)
+    m_impl->sampleRate = sampleRate;
+    m_impl->maxBlock = maxBlockSize;
+    // 표현 파라미터 변경을 담을 여유 (채널×컨트롤러)
+    m_impl->inParams.setMaxParameters(64);
+    m_impl->outParams.setMaxParameters(0);
+    m_impl->ctx = ProcessContext{};
+    m_impl->ctx.sampleRate = sampleRate;
+
+    m_impl->outBus.numChannels = 2;
+    m_impl->outBus.silenceFlags = 0;
+    m_impl->outBus.channelBuffers32 = m_impl->outPtrs.data();
+    m_impl->inBus.numChannels = 2;
+    m_impl->inBus.silenceFlags = 0;
+    m_impl->inBus.channelBuffers32 = m_impl->inPtrs.data();
+
+    m_impl->data.processMode = kRealtime;
+    m_impl->data.symbolicSampleSize = kSample32;
+    m_impl->data.numSamples = 0;
+    m_impl->data.numInputs = hasAudioIn ? 1 : 0;
+    m_impl->data.numOutputs = 1;
+    m_impl->data.inputs = hasAudioIn ? &m_impl->inBus : nullptr;
+    m_impl->data.outputs = &m_impl->outBus;
+    m_impl->data.inputParameterChanges = &m_impl->inParams;
+    m_impl->data.outputParameterChanges = &m_impl->outParams;
+    m_impl->data.inputEvents = &m_impl->eventList;
+    m_impl->data.outputEvents = nullptr;
+    m_impl->data.processContext = &m_impl->ctx;
+
+    m_impl->name = info.name();
+    m_impl->loaded = true;
+    return true;
+}
+
+void Vst3Host::unload() {
+    if (!m_impl) return;
+    m_impl->teardownPlugin();
+    m_impl->module = nullptr;
+    m_impl->classes.clear();
+    m_impl->path.clear();
+}
+
+bool Vst3Host::isLoaded() const { return m_impl && m_impl->loaded; }
+bool Vst3Host::isInstrument() const { return m_impl && m_impl->instrument; }
+std::string Vst3Host::activeName() const { return m_impl ? m_impl->name : std::string(); }
+
+void Vst3Host::addNoteOn(uint8_t channel, uint8_t note, uint8_t velocity) {
+    if (!m_impl->loaded) return;
+    Event e{};
+    e.busIndex = 0;
+    e.sampleOffset = 0;
+    e.flags = Event::kIsLive;
+    e.type = Event::kNoteOnEvent;
+    e.noteOn.channel = channel;
+    e.noteOn.pitch = note;
+    e.noteOn.tuning = 0.0f;
+    e.noteOn.velocity = (float)velocity / 127.0f;
+    e.noteOn.length = 0;
+    e.noteOn.noteId = -1;
+    m_impl->eventList.addEvent(e);
+}
+
+void Vst3Host::addNoteOff(uint8_t channel, uint8_t note) {
+    if (!m_impl->loaded) return;
+    Event e{};
+    e.busIndex = 0;
+    e.sampleOffset = 0;
+    e.flags = Event::kIsLive;
+    e.type = Event::kNoteOffEvent;
+    e.noteOff.channel = channel;
+    e.noteOff.pitch = note;
+    e.noteOff.velocity = 0.0f;
+    e.noteOff.noteId = -1;
+    m_impl->eventList.addEvent(e);
+}
+
+// 채널의 표현 컨트롤러를 매핑된 파라미터 변경으로 큐잉한다.
+void Vst3Host::Impl::addExpression(int ch, int which, float value01) {
+    if (!midiMapping || ch < 0 || ch > 15) return;
+    const ParamID id = exprParam[ch][which];
+    if (id == kNoParamId) return;
+    int32 index = 0;
+    if (IParamValueQueue* q = inParams.addParameterData(id, index)) {
+        int32 pt = 0;
+        q->addPoint(0, (ParamValue)(value01 < 0.f ? 0.f : (value01 > 1.f ? 1.f : value01)), pt);
+    }
+}
+
+void Vst3Host::addPitchBend(uint8_t channel, float bendNorm) {
+    if (!m_impl->loaded) return;
+    m_impl->addExpression(channel, Impl::kBend, bendNorm * 0.5f + 0.5f); // -1~1 -> 0~1
+}
+
+void Vst3Host::addPressure(uint8_t channel, float value01) {
+    if (!m_impl->loaded) return;
+    m_impl->addExpression(channel, Impl::kAfter, value01);
+}
+
+void Vst3Host::addTimbre(uint8_t channel, float value01) {
+    if (!m_impl->loaded) return;
+    m_impl->addExpression(channel, Impl::kTimbre, value01);
+}
+
+void Vst3Host::process(float** outputs, int numChannels, int frames, float** inputs) {
+    if (!m_impl->loaded || !m_impl->processor) return;
+    if (frames > m_impl->maxBlock) frames = m_impl->maxBlock;
+
+    // 채널 버퍼 연결 (최대 2채널). 모자란 출력 채널은 첫 채널로 대체.
+    for (int c = 0; c < 2; ++c)
+        m_impl->outPtrs[c] = outputs[c < numChannels ? c : 0];
+    if (m_impl->data.numInputs > 0) {
+        for (int c = 0; c < 2; ++c)
+            m_impl->inPtrs[c] = inputs ? inputs[c < numChannels ? c : 0] : outputs[0];
+    }
+
+    m_impl->data.numSamples = frames;
+    m_impl->processor->process(m_impl->data);
+
+    // 소비한 이벤트/파라미터 변경 비우기 (다음 블록 준비)
+    m_impl->eventList.clear();
+    m_impl->inParams.clearQueue();
+}
+
+// ---------------------------------------------------------
+// 에디터 창
+// ---------------------------------------------------------
+namespace {
+LRESULT CALLBACK editorWndProc(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
+    if (msg == WM_CLOSE) {
+        ShowWindow(hwnd, SW_HIDE); // 실제 정리는 closeEditor/unload에서
+        return 0;
+    }
+    return DefWindowProcW(hwnd, msg, w, l);
+}
+} // namespace
+
+bool Vst3Host::openEditor() {
+    if (!m_impl->loaded || !m_impl->controller) return false;
+    if (m_impl->view) {
+        ShowWindow(m_impl->editorWnd, SW_SHOW);
+        return true;
+    }
+
+    IPtr<IPlugView> view = owned(m_impl->controller->createView(ViewType::kEditor));
+    if (!view || view->isPlatformTypeSupported(kPlatformTypeHWND) != kResultTrue) return false;
+
+    ViewRect rect{};
+    view->getSize(&rect);
+    int w = rect.getWidth() > 0 ? rect.getWidth() : 400;
+    int h = rect.getHeight() > 0 ? rect.getHeight() : 300;
+
+    static bool registered = false;
+    if (!registered) {
+        WNDCLASSEXW wc{sizeof(wc)};
+        wc.lpfnWndProc = editorWndProc;
+        wc.hInstance = GetModuleHandle(nullptr);
+        wc.lpszClassName = kEditorWndClass;
+        wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+        RegisterClassExW(&wc);
+        registered = true;
+    }
+
+    RECT wr = {0, 0, w, h};
+    AdjustWindowRect(&wr, WS_OVERLAPPEDWINDOW, FALSE);
+    std::wstring title = L"VST 에디터";
+    HWND wnd = CreateWindowW(kEditorWndClass, title.c_str(), WS_OVERLAPPEDWINDOW, CW_USEDEFAULT,
+                             CW_USEDEFAULT, wr.right - wr.left, wr.bottom - wr.top, nullptr, nullptr,
+                             GetModuleHandle(nullptr), nullptr);
+    if (!wnd) return false;
+
+    m_impl->frame = std::make_unique<HostPlugFrame>(wnd);
+    view->setFrame(m_impl->frame.get());
+    if (view->attached(wnd, kPlatformTypeHWND) != kResultTrue) {
+        DestroyWindow(wnd);
+        m_impl->frame.reset();
+        return false;
+    }
+    m_impl->view = view;
+    m_impl->editorWnd = wnd;
+    ShowWindow(wnd, SW_SHOW);
+    UpdateWindow(wnd);
+    return true;
+}
+
+void Vst3Host::closeEditor() {
+    if (m_impl) m_impl->teardownEditor();
+}
+
+bool Vst3Host::editorOpen() const {
+    return m_impl && m_impl->view && m_impl->editorWnd && IsWindowVisible(m_impl->editorWnd);
+}
+
+} // namespace midipro::vst
