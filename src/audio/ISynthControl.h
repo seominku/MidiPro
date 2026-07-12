@@ -23,6 +23,10 @@ public:
     virtual void setParams(const SynthParams& params) = 0;
     virtual int activeVoiceCount() const = 0;
 
+    // 채널(=트랙) 볼륨/팬. 믹서의 트랙 볼륨·팬·뮤트가 MIDI 트랙에도 걸리게 한다.
+    // 값이 바뀔 때만 오디오 스레드로 전달된다.
+    virtual void setChannelMix(int channel, float gain, float pan) = 0;
+
     // 오디오 출력 장치 선택 (예: 포커스라이트 등 오디오 인터페이스)
     virtual std::vector<std::string> listOutputDevices() = 0;
     virtual int outputDevice() const = 0;         // 현재 장치의 목록 내 인덱스 (-1=기본/미선택)

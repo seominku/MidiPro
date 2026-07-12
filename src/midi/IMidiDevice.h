@@ -49,6 +49,11 @@ public:
     virtual bool isOpen() const = 0;
 
     virtual bool send(const std::vector<uint8_t>& bytes) = 0;
+
+    // 이 출력의 소리가 실제로 들리기까지의 지연(초). 화면 재생 헤드를
+    // 그만큼 뒤로 그려 "보이는 바"와 "들리는 소리"를 맞추는 데 쓴다.
+    // 하드웨어 MIDI는 사실상 0, 내장 신스는 오디오 버퍼 지연을 보고한다.
+    virtual double outputLatencySeconds() const { return 0.0; }
 };
 
 } // namespace midipro::midi

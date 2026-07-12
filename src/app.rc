@@ -1,0 +1,3 @@
+// MidiPro 리소스: 실행 파일/창 아이콘
+// (rc.exe로 컴파일해 링크에 포함 — build.bat 참고)
+1 ICON "app.ico"

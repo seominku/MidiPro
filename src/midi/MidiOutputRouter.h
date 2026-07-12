@@ -62,6 +62,10 @@ public:
         IMidiOutput* out = active();
         return out ? out->send(bytes) : false;
     }
+    double outputLatencySeconds() const override {
+        if (m_active < 0 || m_active >= (int)m_targets.size()) return 0.0;
+        return m_targets[m_active].output->outputLatencySeconds();
+    }
 
 private:
     std::vector<Target> m_targets;

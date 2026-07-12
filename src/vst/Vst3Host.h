@@ -51,21 +51,35 @@ public:
 
     bool isLoaded() const;      // 인스턴스화까지 완료됨
     bool isInstrument() const;  // 악기(이벤트 입력)로 동작
+    // 오디오 입력 버스가 있는가. 없으면 인서트 이펙트로 쓸 수 없다
+    // (process()가 입력을 무시하고 출력 버퍼를 덮어써 무음이 된다).
+    bool hasAudioInput() const;
     std::string activeName() const;
 
     // ---- 오디오 스레드 ----
     // process 호출 전에 이 블록에서 발생한 노트를 쌓는다.
     void addNoteOn(uint8_t channel, uint8_t note, uint8_t velocity);
     void addNoteOff(uint8_t channel, uint8_t note);
+    // 눌린 모든 노트에 note-off를 큐잉한다 (정지/시크 시 스턱 노트 방지).
+    void addAllNotesOff();
 
     // MPE 표현: IMidiMapping으로 채널별 파라미터에 매핑해 전달한다.
     // (플러그인이 해당 컨트롤러를 매핑하지 않으면 조용히 무시)
     void addPitchBend(uint8_t channel, float bendNorm); // -1~1
     void addPressure(uint8_t channel, float value01);   // 채널 애프터터치
     void addTimbre(uint8_t channel, float value01);     // CC74
+    // 일반 MIDI CC (모듈레이션 CC1, 서스테인 CC64 등). IMidiMapping으로
+    // 플러그인이 그 CC에 매핑한 파라미터에 전달한다 (매핑 없으면 무시).
+    void addControlChange(uint8_t channel, uint8_t ccNumber, float value01);
     // outputs: 채널별 planar 버퍼 [numChannels][frames].
     // 이펙트면 inputs(입력 오디오)를 받는다. 악기면 inputs=nullptr.
     void process(float** outputs, int numChannels, int frames, float** inputs = nullptr);
+
+    // ---- 상태(패치) 저장/복원 (GUI 스레드, 로드된 상태에서) ----
+    // VST3 표준 getState/setState로 플러그인 내부 상태(음색/노브 전부)를
+    // 바이트로 직렬화한다. 컴포넌트 + 컨트롤러 상태를 한 블록에 담는다.
+    bool saveState(std::vector<uint8_t>& out) const;
+    bool loadState(const uint8_t* data, std::size_t size);
 
     // ---- 에디터 (GUI 스레드) ----
     bool openEditor();   // 플러그인 GUI를 별도 창으로 연다

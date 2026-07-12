@@ -70,10 +70,16 @@ struct Vst3Host::Impl {
     // 0=피치벤드, 1=애프터터치, 2=음색(CC74). 매핑 없으면 kNoParamId.
     static constexpr int kBend = 0, kAfter = 1, kTimbre = 2;
     ParamID exprParam[16][3];
+    // 일반 MIDI CC(0~127) -> 파라미터 매핑 캐시 (채널별). 로드 시 한 번 조회해
+    // 오디오 스레드에서 플러그인 컨트롤러를 재호출하지 않는다.
+    ParamID ccParam[16][128];
 
     bool loaded = false;
     bool instrument = false;
     bool hasAudioInput = false;
+    // 눌린 노트 추적 (오디오 스레드 전용). 정지 시 addAllNotesOff가
+    // 눌린 것들만 note-off로 큐잉해 스턱 노트를 막는다.
+    bool activeNote[16][128] = {};
     std::string name;
     double sampleRate = 44100.0;
     int maxBlock = 512;
@@ -230,6 +236,8 @@ bool Vst3Host::instantiate(int classIndex, double sampleRate, int maxBlockSize, 
     // 파라미터에 연결되는지 미리 조회해 둔다 (오디오 스레드에서 재조회 방지).
     for (int ch = 0; ch < 16; ++ch)
         for (int k = 0; k < 3; ++k) m_impl->exprParam[ch][k] = kNoParamId;
+    for (int ch = 0; ch < 16; ++ch)
+        for (int c = 0; c < 128; ++c) m_impl->ccParam[ch][c] = kNoParamId;
     m_impl->midiMapping = U::cast<IMidiMapping>(m_impl->controller);
     if (m_impl->midiMapping) {
         const int16 ctrlNum[3] = {kPitchBend, kAfterTouch, kCtrlFilterResonance /*CC74*/};
@@ -239,6 +247,15 @@ bool Vst3Host::instantiate(int classIndex, double sampleRate, int maxBlockSize, 
                 if (m_impl->midiMapping->getMidiControllerAssignment(
                         0, (int16)ch, (CtrlNumber)ctrlNum[k], id) == kResultTrue)
                     m_impl->exprParam[ch][k] = id;
+            }
+        // 일반 CC 전체 (모듈레이션/서스테인/익스프레션 등 CC 레인이 쓴다)
+        for (int ch = 0; ch < 16; ++ch)
+            for (int c = 0; c < 128; ++c) {
+                ParamID id = kNoParamId;
+                if (m_impl->midiMapping->getMidiControllerAssignment(0, (int16)ch,
+                                                                     (CtrlNumber)c, id) ==
+                    kResultTrue)
+                    m_impl->ccParam[ch][c] = id;
             }
     }
 
@@ -318,6 +335,7 @@ void Vst3Host::unload() {
 
 bool Vst3Host::isLoaded() const { return m_impl && m_impl->loaded; }
 bool Vst3Host::isInstrument() const { return m_impl && m_impl->instrument; }
+bool Vst3Host::hasAudioInput() const { return m_impl && m_impl->hasAudioInput; }
 std::string Vst3Host::activeName() const { return m_impl ? m_impl->name : std::string(); }
 
 void Vst3Host::addNoteOn(uint8_t channel, uint8_t note, uint8_t velocity) {
@@ -334,6 +352,7 @@ void Vst3Host::addNoteOn(uint8_t channel, uint8_t note, uint8_t velocity) {
     e.noteOn.length = 0;
     e.noteOn.noteId = -1;
     m_impl->eventList.addEvent(e);
+    m_impl->activeNote[channel & 0x0F][note & 0x7F] = true;
 }
 
 void Vst3Host::addNoteOff(uint8_t channel, uint8_t note) {
@@ -348,6 +367,83 @@ void Vst3Host::addNoteOff(uint8_t channel, uint8_t note) {
     e.noteOff.velocity = 0.0f;
     e.noteOff.noteId = -1;
     m_impl->eventList.addEvent(e);
+    m_impl->activeNote[channel & 0x0F][note & 0x7F] = false;
+}
+
+// ---- 상태(패치) 저장/복원 ----
+// 포맷: "MPST" + u32 컴포넌트크기 + 컴포넌트바이트 + u32 컨트롤러크기 + 컨트롤러바이트
+bool Vst3Host::saveState(std::vector<uint8_t>& out) const {
+    out.clear();
+    if (!m_impl->loaded || !m_impl->component) return false;
+
+    MemoryStream comp;
+    if (m_impl->component->getState(&comp) != kResultOk) return false;
+    MemoryStream ctrl;
+    const bool hasCtrl =
+        m_impl->controller && m_impl->controller->getState(&ctrl) == kResultOk;
+
+    auto putU32 = [&out](uint32_t v) {
+        out.push_back((uint8_t)(v & 0xFF));
+        out.push_back((uint8_t)((v >> 8) & 0xFF));
+        out.push_back((uint8_t)((v >> 16) & 0xFF));
+        out.push_back((uint8_t)((v >> 24) & 0xFF));
+    };
+    out.push_back('M');
+    out.push_back('P');
+    out.push_back('S');
+    out.push_back('T');
+    const uint32_t compSize = (uint32_t)comp.getSize();
+    putU32(compSize);
+    const uint8_t* cd = (const uint8_t*)comp.getData();
+    out.insert(out.end(), cd, cd + compSize);
+    const uint32_t ctrlSize = hasCtrl ? (uint32_t)ctrl.getSize() : 0;
+    putU32(ctrlSize);
+    if (ctrlSize > 0) {
+        const uint8_t* td = (const uint8_t*)ctrl.getData();
+        out.insert(out.end(), td, td + ctrlSize);
+    }
+    return true;
+}
+
+bool Vst3Host::loadState(const uint8_t* data, std::size_t size) {
+    if (!m_impl->loaded || !m_impl->component) return false;
+    if (!data || size < 12) return false;
+    if (data[0] != 'M' || data[1] != 'P' || data[2] != 'S' || data[3] != 'T') return false;
+
+    auto readU32 = [&](std::size_t at) {
+        return (uint32_t)data[at] | ((uint32_t)data[at + 1] << 8) |
+               ((uint32_t)data[at + 2] << 16) | ((uint32_t)data[at + 3] << 24);
+    };
+    const uint32_t compSize = readU32(4);
+    if (8 + (std::size_t)compSize + 4 > size) return false;
+    const uint8_t* compData = data + 8;
+    const uint32_t ctrlSize = readU32(8 + compSize);
+    if (8 + (std::size_t)compSize + 4 + ctrlSize > size) return false;
+    const uint8_t* ctrlData = data + 8 + compSize + 4;
+
+    // MemoryStream(비소유)으로 감싸 setState에 넘긴다. 각 사용 전 처음으로 되감기.
+    {
+        MemoryStream cs((void*)compData, (TSize)compSize);
+        if (m_impl->component->setState(&cs) != kResultOk) return false;
+    }
+    if (m_impl->controller) {
+        // 컨트롤러에게 컴포넌트 상태를 알리고, 자체 상태도 복원한다.
+        MemoryStream cs2((void*)compData, (TSize)compSize);
+        m_impl->controller->setComponentState(&cs2);
+        if (ctrlSize > 0) {
+            MemoryStream ts((void*)ctrlData, (TSize)ctrlSize);
+            m_impl->controller->setState(&ts);
+        }
+    }
+    return true;
+}
+
+void Vst3Host::addAllNotesOff() {
+    if (!m_impl->loaded) return;
+    // 눌린 노트에만 note-off를 보낸다 (정지/시크 시 스턱 노트 방지).
+    for (int ch = 0; ch < 16; ++ch)
+        for (int n = 0; n < 128; ++n)
+            if (m_impl->activeNote[ch][n]) addNoteOff((uint8_t)ch, (uint8_t)n);
 }
 
 // 채널의 표현 컨트롤러를 매핑된 파라미터 변경으로 큐잉한다.
@@ -375,6 +471,19 @@ void Vst3Host::addPressure(uint8_t channel, float value01) {
 void Vst3Host::addTimbre(uint8_t channel, float value01) {
     if (!m_impl->loaded) return;
     m_impl->addExpression(channel, Impl::kTimbre, value01);
+}
+
+void Vst3Host::addControlChange(uint8_t channel, uint8_t ccNumber, float value01) {
+    if (!m_impl->loaded || !m_impl->midiMapping) return;
+    const int ch = channel & 0x0F;
+    if (ccNumber > 127) return;
+    const ParamID id = m_impl->ccParam[ch][ccNumber];
+    if (id == kNoParamId) return; // 플러그인이 이 CC를 매핑하지 않음
+    int32 index = 0;
+    if (IParamValueQueue* q = m_impl->inParams.addParameterData(id, index)) {
+        int32 pt = 0;
+        q->addPoint(0, (ParamValue)(value01 < 0.f ? 0.f : (value01 > 1.f ? 1.f : value01)), pt);
+    }
 }
 
 void Vst3Host::process(float** outputs, int numChannels, int frames, float** inputs) {

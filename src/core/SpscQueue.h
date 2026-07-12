@@ -62,6 +62,13 @@ public:
         return m_head.load(std::memory_order_acquire) == m_tail.load(std::memory_order_acquire);
     }
 
+    // 대략적인 보유 개수(소비자 관점). 실시간 모니터의 백로그 제어에 쓴다.
+    std::size_t size() const {
+        const std::size_t t = m_tail.load(std::memory_order_acquire);
+        const std::size_t h = m_head.load(std::memory_order_acquire);
+        return (t - h) & (Capacity - 1);
+    }
+
 private:
     std::array<T, Capacity> m_buffer{}; // 사전 할당(pre-allocation), 재사용만 한다
     std::atomic<std::size_t> m_head{0}; // 소비자가 읽는 위치

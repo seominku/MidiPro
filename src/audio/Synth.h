@@ -53,7 +53,8 @@ public:
     void noteOn(uint8_t channel, uint8_t note, uint8_t velocity);
     void noteOnFloat(uint8_t channel, uint8_t note, float velocity01); // MIDI 2.0 고해상도
     void noteOff(uint8_t channel, uint8_t note);
-    void allNotesOff();
+    void allNotesOff();  // 모든 보이스를 릴리스로 (부드럽게 사라짐)
+    void allSoundOff();  // 모든 보이스를 즉시 무음 (정지/시크 시 잔음 제거)
 
     // 표현 (해당 채널의 활성 보이스에 적용)
     void setPitchBend(uint8_t channel, float bendNorm); // -1~1 (채널 전체)
@@ -67,8 +68,23 @@ public:
     // 피치벤드 범위(반음). 일반=2, MPE 멤버 채널 기본=48.
     void setPitchBendRange(float semitones) { m_bendRangeSemis = semitones; }
 
-    // mono 버퍼에 frames개 샘플을 채운다 (기존 내용 덮어씀).
+    // 채널(=트랙) 믹서: 그 채널 보이스에 곱해지는 게인과 좌우 팬(-1~1).
+    // 믹서의 트랙 볼륨/팬/뮤트가 MIDI 트랙에도 걸리게 한다. 오디오 스레드에서만.
+    void setChannelMix(uint8_t channel, float gain, float pan);
+
+    // mono 버퍼에 frames개 샘플을 채운다 (기존 내용 덮어씀). 팬은 무시된다.
     void render(float* out, int frames);
+
+    // 스테레오 버퍼에 채운다. 채널 팬이 적용된다 (좌/우 딜레이 각각).
+    void renderStereo(float* outL, float* outR, int frames);
+
+    // 채널(트랙)별 버스에 누적한다(busL[ch]/busR[ch]에 += ). 각 버스는 그 채널의
+    // 보이스만 담고 딜레이/마스터볼륨까지 적용된 "그 트랙의 신스 출력"이다.
+    // 트랙별 VST 이펙트 체인을 버스마다 걸기 위해 분리한다.
+    // busL/busR은 각각 kChannels개의 포인터, 각 버퍼는 frames개 이상이어야 한다.
+    void renderBuses(float* const* busL, float* const* busR, int frames);
+
+    static constexpr int kChannels = 16;
 
     int activeVoiceCount() const;
 
@@ -89,18 +105,42 @@ private:
         Oscillator osc;
         Adsr env;
         Filter filter;
+
+        // ---- 드럼 보이스 (채널 10 원샷 퍼커션 — 킥/스네어/햇 등) ----
+        // 일반 osc/env/filter 대신 전용 생성기(drumNext)가 렌더한다.
+        bool drum = false;
+        float dPhase = 0.0f;     // 톤 성분 위상 (0~1)
+        float dFreq = 0.0f;      // 현재 톤 주파수 (시작->끝으로 지수 수렴 = 피치 드롭)
+        float dFreqEnd = 0.0f;
+        float dPitchCoef = 0.0f; // 피치 드롭 계수
+        float dAmp = 0.0f;       // 진폭 (지수 감쇠, 바닥에 닿으면 보이스 회수)
+        float dAmpCoef = 0.0f;
+        float dNoiseMix = 0.0f;  // 0=톤만(킥/탐), 1=노이즈만(햇/심벌)
+        float dHpAmt = 0.0f;     // 노이즈 하이패스 양 (0=거친 노이즈, 1=밝은 심벌)
+        float dLp = 0.0f;        // 노이즈 필터 상태
+        float dGain = 1.0f;      // 소리별 볼륨 보정
+        uint32_t dRng = 22222;   // 노이즈 LCG
     };
 
     Voice* findFreeVoice();     // 비었거나 가장 오래된 보이스
     void updateVoiceTimbre(Voice& v);
     void applyVoiceFrequency(Voice& v); // 노트+벤드로 osc 주파수 갱신
+    float drumNext(Voice& v);           // 드럼 보이스 1샘플 (끝나면 v.active=false)
+    // outR==nullptr이면 모노(팬 무시, 왼쪽 딜레이만) — render()가 쓴다.
+    void renderInto(float* outL, float* outR, int frames);
 
     double m_sampleRate = 44100.0;
     float m_bendRangeSemis = 2.0f;
     SynthParams m_params;
     std::array<Voice, kMaxVoices> m_voices;
+    std::array<float, kChannels> m_chGain{}; // prepare()에서 1.0으로 초기화
+    std::array<float, kChannels> m_chPan{};  // 0.0 = 중앙
     Oscillator m_lfo;
-    Delay m_delay;
+    Delay m_delayL;
+    Delay m_delayR;
+    // 버스별 딜레이: 딜레이는 신스 패치의 일부라 트랙(채널)마다 독립 상태여야 한다.
+    std::array<Delay, kChannels> m_busDelayL;
+    std::array<Delay, kChannels> m_busDelayR;
     uint64_t m_orderCounter = 0;
 };
 

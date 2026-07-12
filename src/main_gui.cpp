@@ -26,7 +26,9 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     midipro::midi::MidiOutputRouter router;
     router.addTarget("하드웨어 MIDI", &hardwareOut);
     router.addTarget("내장 신디사이저", &synthEngine);
+    router.setActiveTarget(1); // 기본 출력 대상 = 내장 신디사이저
 
-    midipro::gui::App app(input, router, synthEngine, synthEngine, synthEngine);
+    midipro::gui::App app(input, router, synthEngine, synthEngine, synthEngine, synthEngine,
+                          synthEngine);
     return app.run();
 }

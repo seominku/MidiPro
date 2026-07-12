@@ -3327,6 +3327,20 @@ static CallbackInfo *asioCallbackInfo;
 static bool asioXRun;
 static bool streamOpen = false; // Tracks whether any instance of RtAudio has a stream open
 
+// [MidiPro patch] ASIO SDK의 asio.cpp는 전역 `AsioDrivers* asioDrivers`를 참조한다
+// (ASIOExit()에서 asioDrivers->removeCurrentDriver()). 그 전역은 SDK 헬퍼
+// loadAsioDriver()를 써야 채워지는데, RtAudio는 위의 자체 `drivers` 인스턴스를
+// 직접 쓰므로 전역이 null로 남아 ASIOExit()에서 널 참조로 크래시했다.
+// (증상: 정상 드라이버가 probe 중 죽어 ASIO 장치 목록이 비어버림)
+// 전역이 RtAudio의 인스턴스를 가리키도록 정적 초기화 시점에 연결한다.
+extern AsioDrivers* asioDrivers;
+namespace {
+struct MidiProAsioGlobalInit {
+  MidiProAsioGlobalInit() { asioDrivers = &drivers; }
+};
+static MidiProAsioGlobalInit g_midiProAsioGlobalInit;
+} // namespace
+
 struct AsioHandle {
   int drainCounter;       // Tracks callback counts when draining
   bool internalDrain;     // Indicates if stop is initiated from callback or not.
@@ -3439,82 +3453,86 @@ void RtApiAsio :: probeDevices( void )
   }
 }
 
-bool RtApiAsio :: probeDeviceInfo( RtAudio::DeviceInfo &info )
+// [MidiPro patch] 개별 ASIO 드라이버의 로드/초기화를 SEH로 감싼다.
+// 하드웨어가 없는 드라이버(예: Focusrite Thunderbolt) 등이 초기화 중 액세스
+// 위반을 내면 원래는 앱 전체가 죽는데, 여기서 잡아 그 드라이버만 건너뛴다.
+#include <excpt.h>
+namespace {
+struct AsioProbeOut {
+  bool ok = false;
+  long inputChannels = 0;
+  long outputChannels = 0;
+  double preferredSampleRate = 0;
+  double sampleRates[32];
+  int nSampleRates = 0;
+  long channelType = 0;
+};
+static bool asioProbeDriverSEH( char* name, AsioProbeOut* o )
 {
-  if ( !drivers.loadDriver( const_cast<char *>(info.name.c_str()) ) ) {
-    errorStream_ << "RtApiAsio::probeDeviceInfo: unable to load driver (" << info.name << ").";
-    errorText_ = errorStream_.str();
-    error( RTAUDIO_WARNING );
-    return false;
-  }
-
-  ASIOError result = ASIOInit( &driverInfo );
-  if ( result != ASE_OK ) {
-    drivers.removeCurrentDriver();
-    errorStream_ << "RtApiAsio::probeDeviceInfo: error (" << getAsioErrorString( result ) << ") initializing driver (" << info.name << ").";
-    errorText_ = errorStream_.str();
-    error( RTAUDIO_WARNING );
-    return false;
-  }
-
-  // Determine the device channel information.
-  long inputChannels, outputChannels;
-  result = ASIOGetChannels( &inputChannels, &outputChannels );
-  if ( result != ASE_OK ) {
+  __try {
+    if ( !drivers.loadDriver( name ) ) return false;
+    if ( ASIOInit( &driverInfo ) != ASE_OK ) { drivers.removeCurrentDriver(); return false; }
+    long inCh = 0, outCh = 0;
+    if ( ASIOGetChannels( &inCh, &outCh ) != ASE_OK ) { ASIOExit(); drivers.removeCurrentDriver(); return false; }
+    o->inputChannels = inCh;
+    o->outputChannels = outCh;
+    static const unsigned int kRates[] = { 4000, 5512, 8000, 9600, 11025, 16000, 22050,
+                                           32000, 44100, 48000, 88200, 96000, 176400, 192000 };
+    for ( int i = 0; i < 14 && o->nSampleRates < 32; i++ ) {
+      if ( ASIOCanSampleRate( (ASIOSampleRate) kRates[i] ) == ASE_OK ) {
+        o->sampleRates[o->nSampleRates++] = kRates[i];
+        if ( !o->preferredSampleRate || ( kRates[i] <= 48000 && kRates[i] > o->preferredSampleRate ) )
+          o->preferredSampleRate = kRates[i];
+      }
+    }
+    ASIOChannelInfo ci;
+    ci.channel = 0;
+    ci.isInput = ( inCh > 0 ) ? 1L : 0L;
+    if ( ASIOGetChannelInfo( &ci ) != ASE_OK ) { ASIOExit(); drivers.removeCurrentDriver(); return false; }
+    o->channelType = ci.type;
     ASIOExit();
     drivers.removeCurrentDriver();
-    errorStream_ << "RtApiAsio::probeDeviceInfo: error (" << getAsioErrorString( result ) << ") getting channel count (" << info.name << ").";
+    o->ok = true;
+    return true;
+  } __except ( EXCEPTION_EXECUTE_HANDLER ) {
+    return false; // 드라이버가 크래시함 -> 이 드라이버는 건너뛴다
+  }
+}
+} // namespace
+
+bool RtApiAsio :: probeDeviceInfo( RtAudio::DeviceInfo &info )
+{
+  AsioProbeOut o;
+  if ( !asioProbeDriverSEH( const_cast<char *>(info.name.c_str()), &o ) || !o.ok ) {
+    errorStream_ << "RtApiAsio::probeDeviceInfo: driver load/init failed or crashed (" << info.name << ").";
     errorText_ = errorStream_.str();
     error( RTAUDIO_WARNING );
     return false;
   }
 
-  info.outputChannels = outputChannels;
-  info.inputChannels = inputChannels;
+  info.outputChannels = o.outputChannels;
+  info.inputChannels = o.inputChannels;
   if ( info.outputChannels > 0 && info.inputChannels > 0 )
     info.duplexChannels = (info.outputChannels > info.inputChannels) ? info.inputChannels : info.outputChannels;
 
-  // Determine the supported sample rates.
+  info.preferredSampleRate = (unsigned int) o.preferredSampleRate;
   info.sampleRates.clear();
-  for ( unsigned int i=0; i<MAX_SAMPLE_RATES; i++ ) {
-    result = ASIOCanSampleRate( (ASIOSampleRate) SAMPLE_RATES[i] );
-    if ( result == ASE_OK ) {
-      info.sampleRates.push_back( SAMPLE_RATES[i] );
-
-      if ( !info.preferredSampleRate || ( SAMPLE_RATES[i] <= 48000 && SAMPLE_RATES[i] > info.preferredSampleRate ) )
-        info.preferredSampleRate = SAMPLE_RATES[i];
-    }
-  }
-
-  // Determine supported data types ... just check first channel and assume rest are the same.
-  ASIOChannelInfo channelInfo;
-  channelInfo.channel = 0;
-  channelInfo.isInput = true;
-  if ( info.inputChannels <= 0 ) channelInfo.isInput = false;
-  result = ASIOGetChannelInfo( &channelInfo );
-  if ( result != ASE_OK ) {
-    ASIOExit();
-    drivers.removeCurrentDriver();
-    errorStream_ << "RtApiAsio::probeDeviceInfo: error (" << getAsioErrorString( result ) << ") getting driver channel info (" << info.name << ").";
-    errorText_ = errorStream_.str();
-    error( RTAUDIO_WARNING );
-    return false;
-  }
+  for ( int i = 0; i < o.nSampleRates; i++ )
+    info.sampleRates.push_back( (unsigned int) o.sampleRates[i] );
 
   info.nativeFormats = 0;
-  if ( channelInfo.type == ASIOSTInt16MSB || channelInfo.type == ASIOSTInt16LSB )
+  const long t = o.channelType;
+  if ( t == ASIOSTInt16MSB || t == ASIOSTInt16LSB )
     info.nativeFormats |= RTAUDIO_SINT16;
-  else if ( channelInfo.type == ASIOSTInt32MSB || channelInfo.type == ASIOSTInt32LSB )
+  else if ( t == ASIOSTInt32MSB || t == ASIOSTInt32LSB )
     info.nativeFormats |= RTAUDIO_SINT32;
-  else if ( channelInfo.type == ASIOSTFloat32MSB || channelInfo.type == ASIOSTFloat32LSB )
+  else if ( t == ASIOSTFloat32MSB || t == ASIOSTFloat32LSB )
     info.nativeFormats |= RTAUDIO_FLOAT32;
-  else if ( channelInfo.type == ASIOSTFloat64MSB || channelInfo.type == ASIOSTFloat64LSB )
+  else if ( t == ASIOSTFloat64MSB || t == ASIOSTFloat64LSB )
     info.nativeFormats |= RTAUDIO_FLOAT64;
-  else if ( channelInfo.type == ASIOSTInt24MSB || channelInfo.type == ASIOSTInt24LSB )
+  else if ( t == ASIOSTInt24MSB || t == ASIOSTInt24LSB )
     info.nativeFormats |= RTAUDIO_SINT24;
 
-  ASIOExit();
-  drivers.removeCurrentDriver();
   return true;
 }
 

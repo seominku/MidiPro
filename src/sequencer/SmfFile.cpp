@@ -6,6 +6,7 @@
 
 #include "midi/MidiConstants.h"
 
+#include <algorithm>
 #include <cstring>
 #include <fstream>
 
@@ -107,15 +108,18 @@ bool save(const Song& song, const std::filesystem::path& path) {
     // ---- 트랙 0: 템포/박자 전용 (포맷 1 관례) ----
     {
         std::vector<uint8_t> body;
-        // Set Tempo: 4분음표당 마이크로초
-        const uint32_t usPerQuarter = (uint32_t)(kMicrosecondsPerMinute / song.bpm);
-        body.push_back(0x00);
-        body.push_back(kMetaPrefix);
-        body.push_back(kMetaSetTempo);
-        body.push_back(0x03);
-        body.push_back((uint8_t)(usPerQuarter >> 16));
-        body.push_back((uint8_t)(usPerQuarter >> 8));
-        body.push_back((uint8_t)(usPerQuarter & 0xFF));
+        // Set Tempo: 4분음표당 마이크로초. 기본 템포 + 곡 중간 변경 지점들.
+        auto pushTempo = [&body](uint32_t delta, double bpm) {
+            const uint32_t us = (uint32_t)(kMicrosecondsPerMinute / (bpm > 1.0 ? bpm : 1.0));
+            writeVlq(body, delta);
+            body.push_back(kMetaPrefix);
+            body.push_back(kMetaSetTempo);
+            body.push_back(0x03);
+            body.push_back((uint8_t)(us >> 16));
+            body.push_back((uint8_t)(us >> 8));
+            body.push_back((uint8_t)(us & 0xFF));
+        };
+        pushTempo(0, song.bpm);
         // Time Signature 4/4 (분모는 2의 지수, 클럭 24, 32분음표 8)
         body.push_back(0x00);
         body.push_back(kMetaPrefix);
@@ -125,6 +129,17 @@ bool save(const Song& song, const std::filesystem::path& path) {
         body.push_back(0x02);
         body.push_back(0x18);
         body.push_back(0x08);
+        // 템포 맵: 틱 순으로 Set Tempo를 이어 붙인다 (표준 SMF 템포 트랙)
+        {
+            std::vector<TempoChange> sortedTc = song.tempoChanges;
+            std::sort(sortedTc.begin(), sortedTc.end(),
+                      [](const TempoChange& a, const TempoChange& b) { return a.tick < b.tick; });
+            uint32_t lastTick = 0;
+            for (const auto& tc : sortedTc) {
+                pushTempo(tc.tick - lastTick, tc.bpm);
+                lastTick = tc.tick;
+            }
+        }
         appendEndOfTrack(body);
         appendTrackChunk(file, body);
     }
@@ -227,15 +242,18 @@ bool load(Song& outSong, const std::filesystem::path& path) {
                 const std::size_t payload = p + 2 + lengthBytes;
                 if (payload + length > bodyEnd) return false;
 
-                if (metaType == kMetaSetTempo && length == 3 && !tempoFound) {
-                    // 왜 첫 템포만 쓰는가: Phase 2는 단일 BPM 모델.
-                    // 템포 맵은 확장 지점으로 남긴다.
+                if (metaType == kMetaSetTempo && length == 3) {
+                    // 첫 템포 = 기본 BPM, 틱 0 이후의 템포는 템포 맵 지점으로.
                     const uint32_t usPerQuarter = ((uint32_t)data[payload] << 16) |
                                                   ((uint32_t)data[payload + 1] << 8) |
                                                   data[payload + 2];
                     if (usPerQuarter > 0) {
-                        song.bpm = kMicrosecondsPerMinute / usPerQuarter;
-                        tempoFound = true;
+                        const double bpm = kMicrosecondsPerMinute / usPerQuarter;
+                        if (!tempoFound) {
+                            song.bpm = bpm;
+                            tempoFound = true;
+                        }
+                        if (absTick > 0) song.tempoChanges.push_back({absTick, bpm});
                     }
                 } else if (metaType == kMetaTrackName && length > 0) {
                     track.name.assign((const char*)&data[payload], length);
@@ -285,6 +303,10 @@ bool load(Song& outSong, const std::filesystem::path& path) {
             song.tracks.push_back(std::move(track));
         }
     }
+
+    // 템포 맵: 여러 트랙에서 모였을 수 있으니 틱 순으로 정렬한다
+    std::sort(song.tempoChanges.begin(), song.tempoChanges.end(),
+              [](const TempoChange& a, const TempoChange& b) { return a.tick < b.tick; });
 
     outSong = std::move(song);
     return true;
