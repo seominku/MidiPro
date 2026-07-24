@@ -222,13 +222,18 @@ void drawMixer(AppState& state) {
     if (!state.showMixer) return;
     ImGui::SetNextWindowSize(ImVec2(640, 640), ImGuiCond_FirstUseEver);
     ImGui::Begin("믹서", &state.showMixer);
+    drawPendingWindowBackground(); // 창별 배경 이미지 (예약이 있으면)
 
     // 마스터(왼쪽 고정) + 모든 트랙 스트립을 나란히. 많으면 가로 스크롤.
     constexpr float kColW = 112.0f;
     constexpr float kFaderH = 210.0f;
     constexpr float kFaderW = 28.0f;
     constexpr float kKnobR = 19.0f;
-    const int nTr = (int)state.song.tracks.size();
+    // 연습 트랙은 '기타 연습' 창 전용 — 믹서에는 곡 트랙만 스트립을 낸다
+    std::vector<int> mixIdx;
+    for (int i = 0; i < (int)state.song.tracks.size(); ++i)
+        if (!state.song.tracks[(std::size_t)i].practice) mixIdx.push_back(i);
+    const int nTr = (int)mixIdx.size();
 
     if (ImGui::BeginTable("mixer_cols", 1 + std::max(1, nTr),
                           ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_SizingFixedFit |
@@ -277,8 +282,9 @@ void drawMixer(AppState& state) {
         drawReturnReverbControls(state);
 
         // ── 트랙 스트립들 (이름 클릭 = 트랙 선택, 선택된 스트립은 하이라이트) ──
-        for (int ti2 = 0; ti2 < nTr; ++ti2) {
-            ImGui::TableSetColumnIndex(1 + ti2);
+        for (int col = 0; col < nTr; ++col) {
+            const int ti2 = mixIdx[(std::size_t)col];
+            ImGui::TableSetColumnIndex(1 + col);
             ImGui::PushID(ti2);
             auto& t = state.song.tracks[(std::size_t)ti2];
             const float trackRaw = state.busPeakCache[t.channel & 0x0F];
@@ -579,6 +585,7 @@ void drawBuiltinFx(AppState& state) {
                   audio::BuiltinFx::typeName(fx->type()), state.builtinFxCh + 1);
     ImGui::SetNextWindowSize(ImVec2(320, 0), ImGuiCond_FirstUseEver);
     ImGui::Begin(title, &open);
+    drawPendingWindowBackground(); // 창별 배경 이미지 (예약이 있으면)
     const audio::BuiltinFx::ParamDesc* pd = audio::BuiltinFx::paramDescs(fx->type());
     bool changed = false;
     for (int i = 0; i < audio::BuiltinFx::kNumParams; ++i) {
@@ -652,6 +659,7 @@ void drawMixerCompact(AppState& state) {
     ImGui::SetNextWindowPos(ImVec2(10.0f, 60.0f), ImGuiCond_FirstUseEver); // 왼쪽에 배치
     ImGui::SetNextWindowSize(ImVec2(270, 620), ImGuiCond_FirstUseEver);
     ImGui::Begin("채널 (마스터/선택 트랙)", &state.showMixerCompact);
+    drawPendingWindowBackground(); // 창별 배경 이미지 (예약이 있으면)
 
     constexpr float kColW = 112.0f;
     constexpr float kFaderH = 230.0f;

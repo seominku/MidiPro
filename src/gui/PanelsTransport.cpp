@@ -276,6 +276,7 @@ static void drawVersionTree(AppState& state, float height) {
 void drawTransport(AppState& state) {
     if (!state.showTransport) return;
     ImGui::Begin("트랜스포트", &state.showTransport);
+    drawPendingWindowBackground(); // 창별 배경 이미지 (예약이 있으면)
 
     const bool playing = state.player && state.player->isPlaying();
 

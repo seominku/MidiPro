@@ -4,8 +4,13 @@
 
 #include "audio/RtAudioEngine.h"
 
+#include "core/CrashLog.h" // 플러그인이 프로세스를 무너뜨렸을 때 흔적 남기기
+#include "core/PathUtf8.h"
 #include "midi/MidiConstants.h"
 #include "midi2/Ump.h"
+
+#include <cstdlib> // _wgetenv (플러그인 캐시 경로)
+#include <filesystem>
 
 #include "RtAudio.h"
 
@@ -170,6 +175,10 @@ bool RtAudioEngine::openPort(unsigned /*index*/) {
 
     m_bufferFrames = frames;
     m_synth.prepare(m_sampleRate);
+    // 이미 올라와 있는 VST들도 새 샘플레이트/블록 크기로 다시 준비한다.
+    // (안 하면 "VSTi를 넣은 뒤 내장 신디사이저를 켜는" 순간 플러그인이 자기가
+    //  약속받은 것과 다른 조건으로 불려 그대로 죽는다)
+    reconfigurePlugins();
 
     err = m_audio->startStream();
     if (err != RTAUDIO_NO_ERROR) {
@@ -1000,8 +1009,11 @@ void RtAudioEngine::setInputDevice(int index) {
 void RtAudioEngine::setInputChannelMode(int mode) {
     if (mode < 0 || mode > 2 || mode == m_inMode) return;
     m_inMode = mode;
+    // ASIO는 항상 채널 [0,1]을 열어두고 콜백이 m_inMode로 골라 쓴다 —
+    // 스트림 재시작 없이 즉시 반영된다 (재시작하면 드라이버 재개폐 위험).
+    if (m_asioOn.load(std::memory_order_acquire)) return;
     const bool was = m_inOpen.load(std::memory_order_acquire);
-    if (was) { stopInput(); startInput(); } // 새 채널 구성으로 재시작
+    if (was) { stopInput(); startInput(); } // WASAPI는 채널 수가 바뀌므로 재시작
 }
 
 void RtAudioEngine::setBufferFrames(unsigned frames) {
@@ -1249,16 +1261,26 @@ std::vector<std::string> RtAudioEngine::listAsioDevices() {
 bool RtAudioEngine::startAsio(int deviceIndex, int channelMode) {
     if (!ensureAsio()) return false;
     ensureComSTA();
-    if (m_asioOn.load(std::memory_order_acquire)) stopAsioInternal(false);
     if (m_asioIds.empty()) listAsioDevices();
     if (m_asioIds.empty()) {
         std::cerr << "[RtAudioEngine] ASIO 드라이버가 없습니다\n";
         return false;
     }
-    const unsigned dev = (deviceIndex >= 0 && deviceIndex < (int)m_asioIds.size())
-                             ? m_asioIds[deviceIndex]
-                             : m_asioIds[0];
-    m_asioDeviceIndex = (deviceIndex >= 0 && deviceIndex < (int)m_asioIds.size()) ? deviceIndex : 0;
+    const int wantIdx =
+        (deviceIndex >= 0 && deviceIndex < (int)m_asioIds.size()) ? deviceIndex : 0;
+    // 이미 같은 장치로 켜져 있으면 재개폐하지 않는다 — ASIO 드라이버를 순식간에
+    // 닫았다 다시 여는 것이 시스템을 멈추게 하는(전원차단까지) 원인이었다.
+    // 채널 모드만 바뀌면 콜백이 즉시 반영하므로 스트림은 그대로 둔다.
+    if (m_asioOn.load(std::memory_order_acquire)) {
+        if (wantIdx == m_asioDeviceIndex) {
+            m_inMode = channelMode;
+            m_monitor.store(true, std::memory_order_relaxed);
+            return true;
+        }
+        stopAsioInternal(false); // 다른 장치로 바꾸는 경우에만 재시작
+    }
+    const unsigned dev = m_asioIds[(std::size_t)wantIdx];
+    m_asioDeviceIndex = wantIdx;
     RtAudio::DeviceInfo info = m_asio->getDeviceInfo(dev);
     if (info.outputChannels == 0) return false;
     m_inMode = channelMode;
@@ -1300,6 +1322,7 @@ bool RtAudioEngine::startAsio(int deviceIndex, int channelMode) {
     m_sampleRate = sr;
     m_synth.prepare(sr);
     m_bufferFrames = frames;
+    reconfigurePlugins(); // ASIO로 갈아탈 때도 조건이 바뀐다
 
     err = m_asio->startStream();
     if (err != RTAUDIO_NO_ERROR) {
@@ -1328,6 +1351,22 @@ void RtAudioEngine::stopAsioInternal(bool restoreOutput) {
     // ASIO가 출력을 담당하고 있었으므로, 끄면 반드시 WASAPI 출력을 되살린다.
     // (예전엔 ASIO 시작 전에 WASAPI가 닫혀 있었으면 아무 스트림도 안 열려 무음이 됐다)
     if (restoreOutput && !isOpen()) openPort(0);
+}
+
+// 스트림이 열릴 때마다 샘플레이트/블록 크기가 달라질 수 있다. 이미 올라와 있는
+// 플러그인들에게 바뀐 조건을 알려 준다 — 안 알려 주면 플러그인은 자기가 준비한
+// 것과 다른 조건으로 불려 오작동하거나 죽는다.
+// 스트림이 아직 시작되지 않은(=오디오 스레드가 없는) 시점에만 부른다.
+void RtAudioEngine::reconfigurePlugins() {
+    const double sr = m_sampleRate;
+    const int mb = (int)m_bufferFrames;
+    m_instrument.reconfigure(sr, mb);
+    m_effect.reconfigure(sr, mb);
+    for (int b = 0; b < kBuses; ++b) {
+        if (m_trackInst[b]) m_trackInst[b]->host.reconfigure(sr, mb);
+        for (auto& fx : m_trackFx[b])
+            if (fx && !fx->builtin) fx->host.reconfigure(sr, mb);
+    }
 }
 
 // ---- 트랙별 이펙트 체인 ----
@@ -1460,19 +1499,54 @@ void RtAudioEngine::setTrackEffectEnabled(int channel, int index, bool on) {
     chain[index]->enabled.store(on, std::memory_order_relaxed); // 실시간 바이패스
 }
 
-// 모듈만 열어 클래스 목록을 보고 닫는다 (인스턴스화하지 않으므로 가볍고 안전).
-bool RtAudioEngine::pluginHasEffectClass(const std::string& path) {
+// 이 플러그인에 악기/이펙트 클래스가 있는지 조사한다.
+//
+// 모듈을 실제로 열어 봐야 알 수 있는데 그게 느리다 — Omnisphere급은 한 개에만
+// 몇 초씩 걸린다. 그래서 ① 악기·이펙트를 한 번에 판정해 모듈을 두 번 열지 않고
+// ② 결과를 디스크에 남겨 다음 실행부터는 열지 않는다.
+// 캐시 파일 자리. 앱의 다른 설정들과 같은 폴더에 둔다.
+// 환경변수는 반드시 와이드로 읽는다 — 좁은 getenv는 ANSI 코드페이지 바이트를
+// 주는데, 그걸 UTF-8로 착각해 경로를 만들면 사용자 이름이 한글일 때 깨진다.
+std::string RtAudioEngine::pluginCachePath() {
+    if (const wchar_t* la = _wgetenv(L"LOCALAPPDATA")) {
+        const std::filesystem::path p = std::filesystem::path(la) / L"MidiPro" / L"plugincache.ini";
+        return core::pathToUtf8(p);
+    }
+    return "plugincache.ini";
+}
+
+vst::PluginKinds RtAudioEngine::pluginKinds(const std::string& path) {
+    if (!m_pluginCacheLoaded) {
+        m_pluginCache.load(pluginCachePath());
+        m_pluginCacheLoaded = true;
+    }
+    vst::PluginKinds k;
+    if (m_pluginCache.lookup(path, k)) return k; // 캐시 적중 — 열지 않는다
+
+    // 여기서 죽으면(플러그인이 여는 것만으로 프로세스를 무너뜨리면) 기록이 남는다
+    const core::CrashContext cc("VST 조사: " + path);
     vst::Vst3Host probe;
     std::string err;
-    if (!probe.loadModule(path, err)) return false;
-    bool any = false;
-    for (const auto& c : probe.classes())
-        if (c.isEffect) {
-            any = true;
-            break;
+    if (probe.loadModule(path, err)) {
+        for (const auto& c : probe.classes()) {
+            if (c.isInstrument) k.hasInstrument = true;
+            if (c.isEffect) k.hasEffect = true;
         }
-    probe.unload();
-    return any;
+        probe.unload();
+    }
+    m_pluginCache.store(path, k);
+    m_pluginCache.save(pluginCachePath()); // 중간에 죽어도 여기까지는 남게
+    return k;
+}
+
+void RtAudioEngine::clearPluginCache() {
+    m_pluginCache.clear();
+    m_pluginCache.save(pluginCachePath());
+    m_pluginCacheLoaded = true;
+}
+
+bool RtAudioEngine::pluginHasEffectClass(const std::string& path) {
+    return pluginKinds(path).hasEffect;
 }
 
 vst::Vst3Host* RtAudioEngine::trackEffectHost(int channel, int index) {
@@ -1519,17 +1593,7 @@ int RtAudioEngine::trackEffectSidechain(int channel, int index) const {
 
 // ---- 트랙별 악기 ----
 bool RtAudioEngine::pluginHasInstrumentClass(const std::string& path) {
-    vst::Vst3Host probe;
-    std::string err;
-    if (!probe.loadModule(path, err)) return false;
-    bool any = false;
-    for (const auto& c : probe.classes())
-        if (c.isInstrument) {
-            any = true;
-            break;
-        }
-    probe.unload();
-    return any;
+    return pluginKinds(path).hasInstrument;
 }
 
 bool RtAudioEngine::loadTrackInstrument(int channel, const std::string& path, int classIndex,
@@ -1549,6 +1613,9 @@ bool RtAudioEngine::loadTrackInstrument(int channel, const std::string& path, in
     bool ok = false;
     auto inst = std::make_unique<TrackInstrument>();
     inst->path = path;
+    // 여기서 죽으면(플러그인이 우리 프로세스를 무너뜨리면) 무엇을 열다 죽었는지
+    // 남는다. 무거운 악기일수록 이 구간이 길다.
+    const core::CrashContext cc("VST 악기 로드: " + path);
     if (inst->host.loadModule(path, err)) {
         // classIndex<0이면 첫 악기 클래스를 자동 선택. 이펙트 클래스는 거부.
         const auto& cls = inst->host.classes();

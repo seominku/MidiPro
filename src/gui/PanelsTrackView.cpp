@@ -27,12 +27,232 @@ namespace midipro::gui {
 static bool g_fxBoxHoveredNow = false;
 
 // ---------------------------------------------------------
+// 트랙 FX 체인 박스 (트랙 뷰 · 기타 연습 창 공용)
+// ---------------------------------------------------------
+
+// 박스 안: [+] 메뉴 + 악기 1줄 + 이펙트 줄들 (더블클릭=편집기, 우클릭=메뉴).
+// withInstrument=false면 이펙트만 다룬다 (연습 창: 기타 톤용 FX 체인).
+void drawTrackFxChain(AppState& state, int trackIndex, float boxW, float boxH,
+                      bool withInstrument) {
+    if (!state.vst || trackIndex < 0 || trackIndex >= (int)state.song.tracks.size())
+        return;
+    auto& track = state.song.tracks[(std::size_t)trackIndex];
+    const int i = trackIndex;
+    const int ch = track.channel & 0x0F;
+    // 저장 목록(track.plugins)엔 악기 항목이 섞여 있어, 체인의 fi번째
+    // 이펙트가 목록의 몇 번째인지 이펙트만 세어 찾는다.
+    const auto fxPluginIndex = [&track](int wantFx) {
+        int k = 0;
+        for (int idx = 0; idx < (int)track.plugins.size(); ++idx) {
+            if (track.plugins[(std::size_t)idx].isInstrument) continue;
+            if (k == wantFx) return idx;
+            ++k;
+        }
+        return -1;
+    };
+
+    ImGui::PushID(trackIndex);
+    ImGui::BeginChild("fxbox", ImVec2(boxW, boxH), true);
+    // FX 박스 위에서는 휠이 "박스 스크롤"이어야 한다 — 확대/축소 핸들러가
+    // 건너뛰도록 호버를 알린다 (다음 프레임 판정용)
+    if (ImGui::IsWindowHovered()) g_fxBoxHoveredNow = true;
+    // [+] : 악기/FX/프리즈 선택 메뉴
+    if (ImGui::SmallButton("+")) {
+        // 연습 트랙은 MIDI 쪽 선택을 건드리지 않는다 (트랙 뷰에 없는 트랙이다)
+        if (!track.practice) state.selectedTrack = i;
+        if (!state.vstInstrumentsFiltered) {
+            state.vstInstrumentsOnly.clear();
+            for (const auto& e : state.vstScanned)
+                if (state.vst->pluginHasInstrumentClass(e.path))
+                    state.vstInstrumentsOnly.push_back(e);
+            state.vstInstrumentsFiltered = true;
+        }
+        if (!state.vstEffectsFiltered) {
+            // 악기 전용 번들(예: Surge XT)은 오디오 입력이 없어 트랙을
+            // 무음으로 만든다. 이펙트 클래스가 있는 것만 남긴다.
+            state.vstEffectsOnly.clear();
+            for (const auto& e : state.vstScanned)
+                if (state.vst->pluginHasEffectClass(e.path))
+                    state.vstEffectsOnly.push_back(e);
+            state.vstEffectsFiltered = true;
+        }
+        ImGui::OpenPopup("addmenu");
+    }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip(withInstrument ? "추가: 악기(VSTi) / FX(이펙트) / 프리즈"
+                                         : "추가: FX(이펙트) — 앰프 시뮬·오버드라이브 등");
+    if (ImGui::BeginPopup("addmenu")) {
+        if (withInstrument && ImGui::BeginMenu("악기 (VSTi)")) {
+            if (state.vstScanned.empty())
+                ImGui::TextDisabled("VST3 창에서 '플러그인 검색'을 먼저 하세요");
+            else if (state.vstInstrumentsOnly.empty())
+                ImGui::TextDisabled("악기로 쓸 수 있는 VST3가 없습니다");
+            for (const auto& e : state.vstInstrumentsOnly) {
+                if (!ImGui::MenuItem(e.name.c_str())) continue;
+                std::string err;
+                if (state.vst->loadTrackInstrument(ch, e.path, -1, err)) {
+                    // 저장 목록 갱신 (악기 항목은 트랙당 1개)
+                    for (auto it = track.plugins.begin(); it != track.plugins.end();)
+                        it = it->isInstrument ? track.plugins.erase(it) : std::next(it);
+                    seq::TrackPlugin pl;
+                    pl.name = state.vst->trackInstrumentName(ch);
+                    if (pl.name.empty()) pl.name = e.name;
+                    pl.path = e.path;
+                    pl.classIndex = -1;
+                    pl.isInstrument = true;
+                    pl.enabled = true;
+                    state.statusMessage = "트랙 악기: " + pl.name;
+                    track.plugins.push_back(std::move(pl));
+                } else {
+                    state.statusMessage = e.name + " - 악기 로드 실패: " + err;
+                }
+            }
+            ImGui::EndMenu();
+        }
+        if (ImGui::BeginMenu("FX (이펙트)")) {
+            if (state.vstScanned.empty())
+                ImGui::TextDisabled("VST3 창에서 '플러그인 검색'을 먼저 하세요");
+            else if (state.vstEffectsOnly.empty())
+                ImGui::TextDisabled("이펙트로 쓸 수 있는 VST3가 없습니다\n"
+                                    "(악기 전용 번들은 트랙 이펙트로 못 씁니다)");
+            for (const auto& e : state.vstEffectsOnly) {
+                if (!ImGui::MenuItem(e.name.c_str())) continue;
+                std::string err;
+                // classIndex = -1: 번들에서 이펙트 클래스를 자동 선택
+                if (state.vst->loadTrackEffect(ch, e.path, -1, err)) {
+                    seq::TrackPlugin pl;
+                    pl.name =
+                        state.vst->trackEffectName(ch, state.vst->trackEffectCount(ch) - 1);
+                    if (pl.name.empty()) pl.name = e.name;
+                    pl.path = e.path;
+                    pl.classIndex = -1; // 복원 때도 자동 선택
+                    pl.isInstrument = false;
+                    pl.enabled = true;
+                    track.plugins.push_back(std::move(pl));
+                    state.statusMessage = "트랙 이펙트 추가: " + pl.name;
+                } else {
+                    state.statusMessage = e.name + " - 추가 실패: " + err;
+                }
+            }
+            ImGui::EndMenu();
+        }
+        if (ImGui::BeginMenu("내장 이펙트")) {
+            // VST 없이 쓰는 기본 이펙트. VST와 같은 체인에 순서대로 걸린다.
+            for (int bt = 0; bt < audio::BuiltinFx::kTypes; ++bt) {
+                if (!ImGui::MenuItem(audio::BuiltinFx::typeName(bt))) continue;
+                if (state.vst->addBuiltinTrackEffect(ch, bt)) {
+                    const int idx = state.vst->trackEffectCount(ch) - 1;
+                    seq::TrackPlugin pl;
+                    pl.name = audio::BuiltinFx::typeName(bt);
+                    if (auto* bf = state.vst->trackEffectBuiltin(ch, idx))
+                        pl.path = builtinFxPathString(*bf);
+                    pl.classIndex = -1;
+                    pl.isInstrument = false;
+                    pl.enabled = true;
+                    track.plugins.push_back(std::move(pl));
+                    state.builtinFxCh = ch; // 파라미터 창 바로 열기
+                    state.builtinFxIdx = idx;
+                    state.statusMessage =
+                        std::string("내장 이펙트 추가: ") + audio::BuiltinFx::typeName(bt);
+                }
+            }
+            ImGui::EndMenu();
+        }
+        if (withInstrument) {
+            ImGui::Separator();
+            if (ImGui::MenuItem(track.frozen ? "프리즈 해제"
+                                             : "프리즈 (MIDI를 오디오로 굽기)")) {
+                if (track.frozen) unfreezeTrack(state, i);
+                else freezeTrack(state, i);
+            }
+        }
+        ImGui::EndPopup();
+    }
+
+    // 악기 줄 ([+] 옆)
+    if (withInstrument) {
+        ImGui::SameLine();
+        if (state.vst->trackInstrumentActive(ch)) {
+            const std::string inm = state.vst->trackInstrumentName(ch);
+            ImGui::TextColored(ImVec4(0.75f, 0.6f, 1.0f, 1.0f), "[i] %s", inm.c_str());
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s\n더블클릭: 편집기 · 우클릭: 메뉴", inm.c_str());
+            if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+                if (auto* h = state.vst->trackInstrumentHost(ch)) h->openEditor();
+            }
+            if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) ImGui::OpenPopup("instctx");
+            if (ImGui::BeginPopup("instctx")) {
+                if (ImGui::MenuItem("편집기 열기")) {
+                    if (auto* h = state.vst->trackInstrumentHost(ch)) h->openEditor();
+                }
+                if (ImGui::MenuItem("악기 제거")) {
+                    state.vst->clearTrackInstrument(ch);
+                    for (auto it = track.plugins.begin(); it != track.plugins.end();)
+                        it = it->isInstrument ? track.plugins.erase(it) : std::next(it);
+                }
+                ImGui::EndPopup();
+            }
+        } else {
+            ImGui::TextDisabled(track.frozen ? "(프리즈됨)" : "비어 있음");
+        }
+    }
+
+    // 이펙트 줄들: [켜기] 이름 (더블클릭 = 편집기, 우클릭 = 메뉴)
+    const int nfx = state.vst->trackEffectCount(ch);
+    int removeFi = -1;
+    for (int fi = 0; fi < nfx; ++fi) {
+        ImGui::PushID(fi);
+        bool on = state.vst->trackEffectEnabled(ch, fi);
+        if (ImGui::Checkbox("##fxon", &on)) { // 실시간 바이패스
+            state.vst->setTrackEffectEnabled(ch, fi, on);
+            const int pidx = fxPluginIndex(fi);
+            if (pidx >= 0) track.plugins[(std::size_t)pidx].enabled = on;
+        }
+        ImGui::SameLine(0.0f, 4.0f);
+        const std::string nm = state.vst->trackEffectName(ch, fi);
+        ImGui::TextColored(on ? ImVec4(1.0f, 0.78f, 0.45f, 1.0f)
+                              : ImVec4(0.5f, 0.5f, 0.5f, 1.0f),
+                           "%s", nm.c_str());
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s\n더블클릭: 편집기 · 우클릭: 메뉴", nm.c_str());
+        if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+            if (auto* h = state.vst->trackEffectHost(ch, fi)) h->openEditor();
+            else if (state.vst->trackEffectBuiltin(ch, fi)) {
+                state.builtinFxCh = ch; // 내장 이펙트: 파라미터 창
+                state.builtinFxIdx = fi;
+            }
+        }
+        if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) ImGui::OpenPopup("fxctx");
+        if (ImGui::BeginPopup("fxctx")) {
+            if (ImGui::MenuItem("편집기 열기")) {
+                if (auto* h = state.vst->trackEffectHost(ch, fi)) h->openEditor();
+                else if (state.vst->trackEffectBuiltin(ch, fi)) {
+                    state.builtinFxCh = ch;
+                    state.builtinFxIdx = fi;
+                }
+            }
+            if (ImGui::MenuItem("삭제")) removeFi = fi;
+            ImGui::EndPopup();
+        }
+        ImGui::PopID();
+    }
+    if (removeFi >= 0) {
+        const int pidx = fxPluginIndex(removeFi);
+        state.vst->removeTrackEffect(ch, removeFi);
+        if (pidx >= 0) track.plugins.erase(track.plugins.begin() + pidx);
+    }
+    ImGui::EndChild();
+    ImGui::PopID();
+}
+
+// ---------------------------------------------------------
 // 트랙 목록
 // ---------------------------------------------------------
 
 void drawTrackList(AppState& state) {
     if (!state.showTracks) return;
     ImGui::Begin("트랙", &state.showTracks);
+    drawPendingWindowBackground(); // 창별 배경 이미지 (예약이 있으면)
 
     if (ImGui::Button("+ 트랙 추가")) ImGui::OpenPopup("addtrackmenu");
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("일반 트랙 또는 드럼 트랙을 만듭니다");
@@ -70,6 +290,7 @@ void drawTrackList(AppState& state) {
 
         for (int i = 0; i < (int)state.song.tracks.size(); ++i) {
             auto& track = state.song.tracks[i];
+            if (track.practice) continue; // 연습 트랙은 '기타 연습' 창에서만
             ImGui::TableNextRow();
             ImGui::PushID(i);
 
@@ -126,6 +347,7 @@ void drawTrackList(AppState& state) {
 void drawTrackView(AppState& state) {
     if (!state.showTrackView) return;
     ImGui::Begin("트랙 뷰", &state.showTrackView);
+    drawPendingWindowBackground(); // 창별 배경 이미지 (예약이 있으면)
 
     // 상단 컨트롤
     ImGui::SetNextItemWidth(150);
@@ -289,6 +511,7 @@ void drawTrackView(AppState& state) {
 
         for (int i = 0; i < (int)state.song.tracks.size(); ++i) {
             auto& track = state.song.tracks[i];
+            if (track.practice) continue; // 연습 트랙은 '기타 연습' 창에서만
             const bool sel = (i == state.selectedTrack);
             const bool recThis = (state.audioRecTrack == i);
             ImGui::TableNextRow(ImGuiTableRowFlags_None, laneH);
@@ -384,17 +607,19 @@ void drawTrackView(AppState& state) {
                     ImGui::PopStyleColor();
                 } else {
                     if (ImGui::SmallButton("ASIO")) {
-                        if (state.asioTrack >= 0) in->stopAsio(); // 다른 트랙 것 정지
+                        // 이미 켜져 있으면 재개폐하지 않고 소유권만 넘긴다 —
+                        // ASIO 드라이버 재개폐가 시스템을 멈추게 하던 원인 제거.
                         if (in->startAsio(state.asioDeviceIndex, track.inputChannelMode)) {
                             state.asioTrack = i;
-                            state.statusMessage = "ASIO 모니터 시작 (저지연)";
+                            state.statusMessage = "ASIO 입력 = 이 트랙 (저지연)";
                         } else {
                             state.statusMessage =
                                 "ASIO를 열 수 없습니다 (설정 > 개인설정 > ASIO에서 장치 확인)";
                         }
                     }
                     if (ImGui::IsItemHovered())
-                        ImGui::SetTooltip("ASIO 저지연 입력 모니터 시작");
+                        ImGui::SetTooltip("ASIO 저지연 입력을 이 트랙으로 잡습니다\n"
+                                          "(스트림은 하나 — 다른 트랙에서 누르면 옮겨집니다)");
                 }
                 ImGui::SameLine();
                 // 입력 채널: 1+2 합침 / 1 / 2 (모노 인풋 기타는 보통 1 또는 2)
@@ -419,211 +644,9 @@ void drawTrackView(AppState& state) {
             // ── FX 체인 박스([+]: 악기/FX/프리즈) | 세로 볼륨 | 세로 레벨 미터 ──
             // 박스 안: 악기 1줄 + 이펙트 줄들 (더블클릭 = 편집기, 우클릭 = 메뉴)
             if (state.vst) {
-                const int ch = track.channel & 0x0F;
                 const float boxW =
                     std::max(60.0f, hp0.x + leftW - ImGui::GetCursorScreenPos().x);
-                // 저장 목록(track.plugins)엔 악기 항목이 섞여 있어, 체인의 fi번째
-                // 이펙트가 목록의 몇 번째인지 이펙트만 세어 찾는다.
-                const auto fxPluginIndex = [&track](int wantFx) {
-                    int k = 0;
-                    for (int idx = 0; idx < (int)track.plugins.size(); ++idx) {
-                        if (track.plugins[(std::size_t)idx].isInstrument) continue;
-                        if (k == wantFx) return idx;
-                        ++k;
-                    }
-                    return -1;
-                };
-
-                ImGui::BeginChild("fxbox", ImVec2(boxW, kBoxH), true);
-                // FX 박스 위에서는 휠이 "박스 스크롤"이어야 한다 — 확대/축소 핸들러가
-                // 건너뛰도록 호버를 알린다 (다음 프레임 판정용, 아래 s_fxBoxHover 참고)
-                if (ImGui::IsWindowHovered()) g_fxBoxHoveredNow = true;
-                // [+] : 악기/FX/프리즈 선택 메뉴
-                if (ImGui::SmallButton("+")) {
-                    state.selectedTrack = i;
-                    if (!state.vstInstrumentsFiltered) {
-                        state.vstInstrumentsOnly.clear();
-                        for (const auto& e : state.vstScanned)
-                            if (state.vst->pluginHasInstrumentClass(e.path))
-                                state.vstInstrumentsOnly.push_back(e);
-                        state.vstInstrumentsFiltered = true;
-                    }
-                    if (!state.vstEffectsFiltered) {
-                        // 악기 전용 번들(예: Surge XT)은 오디오 입력이 없어 트랙을
-                        // 무음으로 만든다. 이펙트 클래스가 있는 것만 남긴다.
-                        state.vstEffectsOnly.clear();
-                        for (const auto& e : state.vstScanned)
-                            if (state.vst->pluginHasEffectClass(e.path))
-                                state.vstEffectsOnly.push_back(e);
-                        state.vstEffectsFiltered = true;
-                    }
-                    ImGui::OpenPopup("addmenu");
-                }
-                if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("추가: 악기(VSTi) / FX(이펙트) / 프리즈");
-                if (ImGui::BeginPopup("addmenu")) {
-                    if (ImGui::BeginMenu("악기 (VSTi)")) {
-                        if (state.vstScanned.empty())
-                            ImGui::TextDisabled("VST3 창에서 '플러그인 검색'을 먼저 하세요");
-                        else if (state.vstInstrumentsOnly.empty())
-                            ImGui::TextDisabled("악기로 쓸 수 있는 VST3가 없습니다");
-                        for (const auto& e : state.vstInstrumentsOnly) {
-                            if (!ImGui::MenuItem(e.name.c_str())) continue;
-                            std::string err;
-                            if (state.vst->loadTrackInstrument(ch, e.path, -1, err)) {
-                                // 저장 목록 갱신 (악기 항목은 트랙당 1개)
-                                for (auto it = track.plugins.begin();
-                                     it != track.plugins.end();)
-                                    it = it->isInstrument ? track.plugins.erase(it)
-                                                          : std::next(it);
-                                seq::TrackPlugin pl;
-                                pl.name = state.vst->trackInstrumentName(ch);
-                                if (pl.name.empty()) pl.name = e.name;
-                                pl.path = e.path;
-                                pl.classIndex = -1;
-                                pl.isInstrument = true;
-                                pl.enabled = true;
-                                state.statusMessage = "트랙 악기: " + pl.name;
-                                track.plugins.push_back(std::move(pl));
-                            } else {
-                                state.statusMessage = e.name + " - 악기 로드 실패: " + err;
-                            }
-                        }
-                        ImGui::EndMenu();
-                    }
-                    if (ImGui::BeginMenu("FX (이펙트)")) {
-                        if (state.vstScanned.empty())
-                            ImGui::TextDisabled("VST3 창에서 '플러그인 검색'을 먼저 하세요");
-                        else if (state.vstEffectsOnly.empty())
-                            ImGui::TextDisabled("이펙트로 쓸 수 있는 VST3가 없습니다\n"
-                                                "(악기 전용 번들은 트랙 이펙트로 못 씁니다)");
-                        for (const auto& e : state.vstEffectsOnly) {
-                            if (!ImGui::MenuItem(e.name.c_str())) continue;
-                            std::string err;
-                            // classIndex = -1: 번들에서 이펙트 클래스를 자동 선택
-                            if (state.vst->loadTrackEffect(ch, e.path, -1, err)) {
-                                seq::TrackPlugin pl;
-                                pl.name = state.vst->trackEffectName(
-                                    ch, state.vst->trackEffectCount(ch) - 1);
-                                if (pl.name.empty()) pl.name = e.name;
-                                pl.path = e.path;
-                                pl.classIndex = -1; // 복원 때도 자동 선택
-                                pl.isInstrument = false;
-                                pl.enabled = true;
-                                track.plugins.push_back(std::move(pl));
-                                state.statusMessage = "트랙 이펙트 추가: " + pl.name;
-                            } else {
-                                state.statusMessage = e.name + " - 추가 실패: " + err;
-                            }
-                        }
-                        ImGui::EndMenu();
-                    }
-                    if (ImGui::BeginMenu("내장 이펙트")) {
-                        // VST 없이 쓰는 기본 이펙트. VST와 같은 체인에 순서대로 걸린다.
-                        for (int bt = 0; bt < audio::BuiltinFx::kTypes; ++bt) {
-                            if (!ImGui::MenuItem(audio::BuiltinFx::typeName(bt))) continue;
-                            if (state.vst->addBuiltinTrackEffect(ch, bt)) {
-                                const int idx = state.vst->trackEffectCount(ch) - 1;
-                                seq::TrackPlugin pl;
-                                pl.name = audio::BuiltinFx::typeName(bt);
-                                if (auto* bf = state.vst->trackEffectBuiltin(ch, idx))
-                                    pl.path = builtinFxPathString(*bf);
-                                pl.classIndex = -1;
-                                pl.isInstrument = false;
-                                pl.enabled = true;
-                                track.plugins.push_back(std::move(pl));
-                                state.builtinFxCh = ch; // 파라미터 창 바로 열기
-                                state.builtinFxIdx = idx;
-                                state.statusMessage = std::string("내장 이펙트 추가: ") +
-                                                      audio::BuiltinFx::typeName(bt);
-                            }
-                        }
-                        ImGui::EndMenu();
-                    }
-                    ImGui::Separator();
-                    if (ImGui::MenuItem(track.frozen ? "프리즈 해제"
-                                                     : "프리즈 (MIDI를 오디오로 굽기)")) {
-                        if (track.frozen) unfreezeTrack(state, i);
-                        else freezeTrack(state, i);
-                    }
-                    ImGui::EndPopup();
-                }
-
-                // 악기 줄 ([+] 옆)
-                ImGui::SameLine();
-                if (state.vst->trackInstrumentActive(ch)) {
-                    const std::string inm = state.vst->trackInstrumentName(ch);
-                    ImGui::TextColored(ImVec4(0.75f, 0.6f, 1.0f, 1.0f), "[i] %s", inm.c_str());
-                    if (ImGui::IsItemHovered())
-                        ImGui::SetTooltip("%s\n더블클릭: 편집기 · 우클릭: 메뉴", inm.c_str());
-                    if (ImGui::IsItemHovered() &&
-                        ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
-                        if (auto* h = state.vst->trackInstrumentHost(ch)) h->openEditor();
-                    }
-                    if (ImGui::IsItemClicked(ImGuiMouseButton_Right))
-                        ImGui::OpenPopup("instctx");
-                    if (ImGui::BeginPopup("instctx")) {
-                        if (ImGui::MenuItem("편집기 열기")) {
-                            if (auto* h = state.vst->trackInstrumentHost(ch)) h->openEditor();
-                        }
-                        if (ImGui::MenuItem("악기 제거")) {
-                            state.vst->clearTrackInstrument(ch);
-                            for (auto it = track.plugins.begin(); it != track.plugins.end();)
-                                it = it->isInstrument ? track.plugins.erase(it) : std::next(it);
-                        }
-                        ImGui::EndPopup();
-                    }
-                } else {
-                    ImGui::TextDisabled(track.frozen ? "(프리즈됨)" : "비어 있음");
-                }
-
-                // 이펙트 줄들: [켜기] 이름 (더블클릭 = 편집기, 우클릭 = 메뉴)
-                const int nfx = state.vst->trackEffectCount(ch);
-                int removeFi = -1;
-                for (int fi = 0; fi < nfx; ++fi) {
-                    ImGui::PushID(fi);
-                    bool on = state.vst->trackEffectEnabled(ch, fi);
-                    if (ImGui::Checkbox("##fxon", &on)) { // 실시간 바이패스
-                        state.vst->setTrackEffectEnabled(ch, fi, on);
-                        const int pidx = fxPluginIndex(fi);
-                        if (pidx >= 0) track.plugins[(std::size_t)pidx].enabled = on;
-                    }
-                    ImGui::SameLine(0.0f, 4.0f);
-                    const std::string nm = state.vst->trackEffectName(ch, fi);
-                    ImGui::TextColored(on ? ImVec4(1.0f, 0.78f, 0.45f, 1.0f)
-                                          : ImVec4(0.5f, 0.5f, 0.5f, 1.0f),
-                                       "%s", nm.c_str());
-                    if (ImGui::IsItemHovered())
-                        ImGui::SetTooltip("%s\n더블클릭: 편집기 · 우클릭: 메뉴", nm.c_str());
-                    if (ImGui::IsItemHovered() &&
-                        ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
-                        if (auto* h = state.vst->trackEffectHost(ch, fi)) h->openEditor();
-                        else if (state.vst->trackEffectBuiltin(ch, fi)) {
-                            state.builtinFxCh = ch; // 내장 이펙트: 파라미터 창
-                            state.builtinFxIdx = fi;
-                        }
-                    }
-                    if (ImGui::IsItemClicked(ImGuiMouseButton_Right))
-                        ImGui::OpenPopup("fxctx");
-                    if (ImGui::BeginPopup("fxctx")) {
-                        if (ImGui::MenuItem("편집기 열기")) {
-                            if (auto* h = state.vst->trackEffectHost(ch, fi)) h->openEditor();
-                            else if (state.vst->trackEffectBuiltin(ch, fi)) {
-                                state.builtinFxCh = ch;
-                                state.builtinFxIdx = fi;
-                            }
-                        }
-                        if (ImGui::MenuItem("삭제")) removeFi = fi;
-                        ImGui::EndPopup();
-                    }
-                    ImGui::PopID();
-                }
-                if (removeFi >= 0) {
-                    const int pidx = fxPluginIndex(removeFi);
-                    state.vst->removeTrackEffect(ch, removeFi);
-                    if (pidx >= 0) track.plugins.erase(track.plugins.begin() + pidx);
-                }
-                ImGui::EndChild();
+                drawTrackFxChain(state, i, boxW, kBoxH, /*withInstrument=*/true);
             }
             ImGui::EndGroup();
 

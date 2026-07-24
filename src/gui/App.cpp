@@ -7,6 +7,9 @@
 #include "core/PathUtf8.h"
 #include "gui/App.h"
 #include "gui/PanelsInternal.h" // addTrackEq (새 트랙 기본 EQ)
+#include "gui/BackgroundImage.h"
+#include "gui/Settings.h"
+#include "gui/UiSkin.h"
 #include "gui/Panels.h"
 
 #include "audio/AudioClip.h"
@@ -974,9 +977,36 @@ int App::run() {
     io.IniFilename = layoutIni.c_str();
 
     // 테마: 저장된 사용자 테마가 있으면 복원, 없으면 기본 다크
-    if (!loadTheme(m_state.theme, autosaveDir() / L"theme.ini"))
+    if (!loadTheme(m_state.theme, autosaveDir() / L"theme.ini", m_state.windowStyles))
         applyThemeParams(m_state.theme);
     loadRecentList(); // 최근 프로젝트 목록 복원
+
+    // 장치 설정 복원: 마지막에 쓰던 MIDI 입력/출력을 이름으로 찾아 그대로 연다.
+    // (번호로 저장하면 장치를 꽂았다 뺐다 할 때 엉뚱한 게 열린다)
+    AppSettings settings;
+    loadSettings(settings, autosaveDir() / L"settings.ini");
+    m_state.softThru = settings.softThru;
+    auto findPort = [](const std::vector<std::string>& ports, const std::string& name) {
+        for (int i = 0; i < (int)ports.size(); ++i)
+            if (ports[(std::size_t)i] == name) return i;
+        return -1;
+    };
+    if (m_state.input && !settings.midiInPort.empty()) {
+        const int idx = findPort(m_state.input->listPorts(), settings.midiInPort);
+        if (idx >= 0) {
+            m_state.selectedInputPort = idx;
+            if (settings.midiInAutoOpen && !m_state.input->isOpen())
+                m_state.input->openPort((unsigned)idx);
+        }
+    }
+    if (m_state.output && !settings.midiOutPort.empty()) {
+        const int idx = findPort(m_state.output->listPorts(), settings.midiOutPort);
+        if (idx >= 0) {
+            m_state.selectedOutputPort = idx;
+            if (settings.midiOutAutoOpen && !m_state.output->isOpen())
+                m_state.output->openPort((unsigned)idx);
+        }
+    }
 
     // 한글 폰트: Windows 기본 맑은 고딕 + 한국어 글리프 범위
     ImFontConfig fontCfg;
@@ -985,6 +1015,87 @@ int App::run() {
 
     ImGui_ImplWin32_Init(hwnd);
     ImGui_ImplDX11_Init(g_device, g_context);
+
+    // 배경 텍스처: 레이어 목록과 1:1로 맞춰 둔다 (전체 배경 + 창별).
+    // 레이어를 추가/삭제/교체하면 이 목록을 다시 만든다.
+    std::vector<std::unique_ptr<BackgroundImage>> bgTex;
+    std::vector<std::unique_ptr<BackgroundImage>> winBgTex[kThemeWindowCount];
+    UiSkinner skinner; // 버튼·탭·제목 표시줄 이미지 (모든 창 공통)
+
+    // 레이어 목록대로 텍스처를 올린다. 읽지 못한 레이어는 목록에서 뺀다.
+    auto syncLayers = [&](std::vector<BgLayer>& layers,
+                          std::vector<std::unique_ptr<BackgroundImage>>& tex) {
+        tex.clear();
+        for (std::size_t i = 0; i < layers.size();) {
+            auto img = std::make_unique<BackgroundImage>();
+            if (layers[i].image.empty() || !img->load(g_device, layers[i].image)) {
+                layers.erase(layers.begin() + (long)i); // 파일이 사라졌으면 레이어도 제거
+                continue;
+            }
+            tex.push_back(std::move(img));
+            ++i;
+        }
+    };
+    auto reloadGlobalBg = [&]() {
+        syncLayers(m_state.theme.bgLayers, bgTex);
+        // 첫 레이어 정보를 표시용으로 (몇 장인지도 함께)
+        m_state.bgImageInfo[0] = '\0';
+        if (!bgTex.empty()) {
+            const auto& b = *bgTex[0];
+            std::snprintf(m_state.bgImageInfo, sizeof(m_state.bgImageInfo),
+                          b.animated() ? "%dx%d · GIF %d프레임" : "%dx%d", b.width(),
+                          b.height(), b.frameCount());
+        }
+    };
+    auto loadWinBg = [&](int i) {
+        syncLayers(m_state.windowStyles[i].bgLayers, winBgTex[i]);
+    };
+
+    for (int i = 0; i < kThemeWindowCount; ++i) loadWinBg(i);
+    reloadGlobalBg();
+
+    // 명령줄로 받은 프로젝트 열기 (.midipro 파일 연결 / 파일에 끌어다 놓기).
+    // 실제 로드는 루프의 recentOpenPath 처리부가 맡는다 — 경로 하나만 넘겨 준다.
+    {
+        int argc = 0;
+        LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+        if (argv) {
+            for (int i = 1; i < argc; ++i) {
+                const std::filesystem::path p = argv[i];
+                std::error_code ec;
+                if (std::filesystem::exists(p, ec)) {
+                    m_state.recentOpenPath = core::pathToUtf8(p);
+                    break; // 첫 번째로 실재하는 경로만 연다
+                }
+            }
+            LocalFree(argv);
+        }
+    }
+
+    // 받은 테마 파일(.mptheme) 적용: 담겨 있던 이미지를 풀어 이 PC 경로로 바꾼 뒤
+    // 바로 적용하고, '내 테마' 목록에도 넣어 다음에 다시 고를 수 있게 한다.
+    auto importThemeFile = [&](const std::filesystem::path& path) {
+        const auto themesDir = autosaveDir() / L"themes";
+        ThemeParams t;
+        WindowStyleOverride w[kThemeWindowCount];
+        if (!importTheme(path, t, w, themesDir / L"assets")) {
+            m_state.statusMessage = "테마 파일을 읽지 못했습니다";
+            return;
+        }
+        m_state.theme = t;
+        for (int i = 0; i < kThemeWindowCount; ++i) m_state.windowStyles[i] = w[i];
+        applyThemeParams(m_state.theme);
+        reloadGlobalBg();
+        for (int i = 0; i < kThemeWindowCount; ++i) loadWinBg(i);
+        // 목록에 남기기 (이미지 경로는 이미 이 PC 것으로 바뀌어 있다)
+        std::error_code ec;
+        std::filesystem::create_directories(themesDir, ec);
+        const std::string name = path.stem().string();
+        saveTheme(m_state.theme, themesDir / (name + ".mptheme"), m_state.windowStyles);
+        m_state.themeListDirty = true;
+        m_state.themeDirty = true;
+        m_state.statusMessage = "테마 적용: " + name;
+    };
 
     // ---- 크래시 복구: 이전 세션이 락을 남기고 죽었으면 자동 저장본을 제안 ----
     {
@@ -1019,12 +1130,104 @@ int App::run() {
         }
         if (!running) break;
 
+        // 위젯 스킨(버튼·탭·제목 이미지)은 폰트 아틀라스를 건드리므로 프레임 밖에서
+        if (m_state.skinImageOpenRequested) {
+            m_state.skinImageOpenRequested = false;
+            const int sl = m_state.skinImageSlot;
+            const std::string p = fileDialog(
+                hwnd, false,
+                L"이미지 (*.png;*.jpg;*.jpeg;*.bmp;*.gif)\0*.png;*.jpg;*.jpeg;*.bmp;*.gif\0"
+                L"모든 파일\0*.*\0",
+                L"png");
+            if (!p.empty() && sl >= 0 && sl < kSkinSlotCount) {
+                m_state.theme.skins[sl].image = p;
+                m_state.themeDirty = true;
+            }
+        }
+        skinner.sync(m_state.theme);
+        if (const char* e = skinner.lastError())
+            m_state.statusMessage = std::string(e) + " 이미지를 읽지 못했습니다 (형식 확인)";
+
         ImGui_ImplDX11_NewFrame();
         ImGui_ImplWin32_NewFrame();
         ImGui::NewFrame();
 
-        // 전체 화면 도킹 공간 (1.92: 첫 인자는 dockspace id)
-        const ImGuiID dockId = ImGui::DockSpaceOverViewport(0, ImGui::GetMainViewport());
+        // ---- 배경 이미지/GIF ----
+        // 요청 처리(열기/제거)를 먼저 하고, 모든 창보다 뒤에 깔리는 배경
+        // 그리기 목록에 그린다.
+        // 배경 이미지 추가/제거 요청 (전체 = 대상 -1, 그 외 = 그 창)
+        if (m_state.bgImageOpenRequested) {
+            m_state.bgImageOpenRequested = false;
+            const std::string p = fileDialog(
+                hwnd, false,
+                L"이미지 (*.png;*.jpg;*.jpeg;*.bmp;*.gif)\0*.png;*.jpg;*.jpeg;*.bmp;*.gif\0"
+                L"모든 파일\0*.*\0",
+                L"png");
+            const int tw = m_state.bgImageTargetWindow;
+            if (!p.empty()) {
+                BgLayer L;
+                L.image = p;
+                L.opacity = 1.0f;
+                auto& layers = (tw < 0) ? m_state.theme.bgLayers
+                                        : m_state.windowStyles[tw].bgLayers;
+                const std::size_t before = layers.size();
+                layers.push_back(L);
+                if (tw < 0) reloadGlobalBg();
+                else loadWinBg(tw);
+                if (layers.size() == before) { // 읽기 실패 -> 목록에서 이미 빠졌다
+                    m_state.statusMessage = "이미지를 읽지 못했습니다 (형식 확인)";
+                } else {
+                    // 배경이 아예 안 보이면 당황하므로 패널을 살짝 비춘다
+                    if (tw < 0) {
+                        if (m_state.theme.panelAlpha > 0.97f) {
+                            m_state.theme.panelAlpha = 0.85f;
+                            applyThemeParams(m_state.theme);
+                        }
+                        m_state.statusMessage =
+                            "배경 이미지 추가 (" + std::to_string(layers.size()) + "장)";
+                    } else {
+                        auto& ov = m_state.windowStyles[tw];
+                        if (!ov.usePanelAlpha || ov.panelAlpha > 0.97f) {
+                            ov.enabled = true;
+                            ov.usePanelAlpha = true;
+                            ov.panelAlpha = 0.75f;
+                        }
+                        m_state.statusMessage =
+                            std::string("창 배경 추가: ") + themeWindowName(tw);
+                    }
+                    m_state.themeDirty = true;
+                }
+            }
+        }
+        // 레이어 목록이 바뀌었으면(추가·삭제·순서) 텍스처를 다시 맞춘다
+        if (m_state.bgLayersDirty >= 0) {
+            const int tw = m_state.bgLayersDirty == 0 ? -1 : m_state.bgLayersDirty - 1;
+            m_state.bgLayersDirty = -1;
+            if (tw < 0) reloadGlobalBg();
+            else if (tw < kThemeWindowCount) loadWinBg(tw);
+            m_state.themeDirty = true;
+        }
+
+        // 전체 배경: 레이어를 아래에서 위로 겹쳐 그린다
+        for (std::size_t i = 0; i < bgTex.size() && i < m_state.theme.bgLayers.size(); ++i) {
+            const auto& L = m_state.theme.bgLayers[i];
+            if (!L.visible) continue;
+            BgPlacement pl;
+            pl.opacity = L.opacity;
+            pl.fit = L.fit;
+            pl.scale = L.scale;
+            pl.posX = L.posX;
+            pl.posY = L.posY;
+            drawBackgroundImage(*bgTex[i], pl, ImGui::GetTime());
+        }
+
+        // 전체 화면 도킹 공간 (1.92: 첫 인자는 dockspace id).
+        // 배경 이미지가 있으면 가운데 빈 영역을 투명하게 뚫어(PassthruCentralNode)
+        // 도킹 호스트 창이 배경을 덮지 않게 한다.
+        const ImGuiDockNodeFlags dockFlags =
+            bgTex.empty() ? 0 : ImGuiDockNodeFlags_PassthruCentralNode;
+        const ImGuiID dockId =
+            ImGui::DockSpaceOverViewport(0, ImGui::GetMainViewport(), dockFlags);
 
         // 첫 실행 시 화면을 꽉 채우는 기본 레이아웃을 구성한다.
         // 트랜스포트(위) · 트랙/장치(왼쪽) · 피아노 롤(가운데) · 도구(오른쪽) · 모니터(아래).
@@ -1085,24 +1288,45 @@ int App::run() {
         // 뷰(트랙 뷰)가 못 봤으므로 다음 프레임까지 남겨 모두 반영하게 한다.
         const bool scrollReqAtFrameStart = m_state.scrollToPlayhead;
         drawMenuBar(m_state, openRequested, saveRequested);
-        drawTransport(m_state);
-        drawDevices(m_state);
-        drawTrackList(m_state);
-        drawTrackView(m_state);
-        drawMixer(m_state);
-        drawMixerCompact(m_state);
-        drawPerf(m_state);
-        drawPianoRoll(m_state);
-        drawDrums(m_state);
-        drawArrange(m_state);
-        drawGuitarTab(m_state);
-        drawSynth(m_state);
-        drawPreferences(m_state);
-        drawExportDialog(m_state);
-        drawBuiltinFx(m_state);
-        drawVst(m_state);
-        drawGuitarHelper(m_state);
-        drawMonitor(m_state);
+        // 창마다 스타일 오버라이드를 적용해 그린다 (없으면 전역 스타일 그대로).
+        // ImGui 스타일이 전역이라, 그리기 직전에 바꿔 끼우고 끝나면 되돌린다.
+        auto themed = [&](int win, void (*fn)(AppState&)) {
+            const bool pushed = pushWindowStyle(m_state.theme, m_state.windowStyles[win]);
+            const auto& ov = m_state.windowStyles[win];
+            // 그 창의 Begin 직후에 깔릴 배경들을 아래→위 순서로 예약
+            for (std::size_t i = 0; i < winBgTex[win].size() && i < ov.bgLayers.size(); ++i) {
+                const auto& L = ov.bgLayers[i];
+                if (!L.visible) continue;
+                BgPlacement pl;
+                pl.opacity = L.opacity;
+                pl.fit = L.fit;
+                pl.scale = L.scale;
+                pl.posX = L.posX;
+                pl.posY = L.posY;
+                addPendingWindowBackground(winBgTex[win][i].get(), pl, ImGui::GetTime());
+            }
+            fn(m_state);
+            clearPendingWindowBackground(); // 창이 안 그려졌으면 다음 창으로 새지 않게
+            popWindowStyle(pushed);
+        };
+        themed(kWinTransport, &drawTransport);
+        themed(kWinDevices, &drawDevices);
+        themed(kWinTrackList, &drawTrackList);
+        themed(kWinTrackView, &drawTrackView);
+        themed(kWinMixer, &drawMixer);
+        themed(kWinMixerCompact, &drawMixerCompact);
+        themed(kWinPerf, &drawPerf);
+        themed(kWinPianoRoll, &drawPianoRoll);
+        themed(kWinDrums, &drawDrums);
+        themed(kWinArrange, &drawArrange);
+        themed(kWinGuitarTab, &drawGuitarTab);
+        themed(kWinSynth, &drawSynth);
+        themed(kWinPreferences, &drawPreferences);
+        themed(kWinExport, &drawExportDialog);
+        themed(kWinBuiltinFx, &drawBuiltinFx);
+        themed(kWinVst, &drawVst);
+        themed(kWinGuitarHelper, &drawGuitarHelper);
+        themed(kWinMonitor, &drawMonitor);
         if (scrollReqAtFrameStart) m_state.scrollToPlayhead = false; // 모든 뷰가 반영한 뒤 해제
 
         if (openRequested) {
@@ -1247,8 +1471,109 @@ int App::run() {
 
         // 테마 변경 시 저장 (슬라이더 드래그 중에는 파일 쓰기를 미룬다)
         if (m_state.themeDirty && !ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
-            saveTheme(m_state.theme, autosaveDir() / L"theme.ini");
+            saveTheme(m_state.theme, autosaveDir() / L"theme.ini", m_state.windowStyles);
             m_state.themeDirty = false;
+        }
+
+        // ---- 내 테마: 저장/불러오기/삭제 + 목록 갱신 ----
+        {
+            namespace fs = std::filesystem;
+            const fs::path dir = autosaveDir() / L"themes";
+            auto themePath = [&](const std::string& name) {
+                return dir / (std::filesystem::path(name).filename().string() + ".mptheme");
+            };
+            if (m_state.themeSaveRequested) {
+                m_state.themeSaveRequested = false;
+                std::error_code ec;
+                fs::create_directories(dir, ec);
+                const std::string name = m_state.themeSaveName;
+                if (saveTheme(m_state.theme, themePath(name), m_state.windowStyles)) {
+                    m_state.statusMessage = "테마 저장: " + name;
+                    m_state.themeListDirty = true;
+                } else {
+                    m_state.statusMessage = "테마 저장 실패";
+                }
+            }
+            if (!m_state.themeLoadRequested.empty()) {
+                const std::string name = m_state.themeLoadRequested;
+                m_state.themeLoadRequested.clear();
+                // 불러오기 전에 창별 설정을 비운다 (파일에 없는 창은 전체를 따라가도록)
+                for (int i = 0; i < kThemeWindowCount; ++i)
+                    m_state.windowStyles[i] = WindowStyleOverride{};
+                if (loadTheme(m_state.theme, themePath(name), m_state.windowStyles)) {
+                    reloadGlobalBg();                                        // 전체 배경
+                    for (int i = 0; i < kThemeWindowCount; ++i) loadWinBg(i); // 창별 배경
+                    m_state.themeDirty = true; // 현재 테마로도 저장해 둔다
+                    m_state.statusMessage = "테마 불러옴: " + name;
+                } else {
+                    m_state.statusMessage = "테마를 불러오지 못했습니다: " + name;
+                }
+            }
+            if (!m_state.themeDeleteRequested.empty()) {
+                const std::string name = m_state.themeDeleteRequested;
+                m_state.themeDeleteRequested.clear();
+                std::error_code ec;
+                fs::remove(themePath(name), ec);
+                m_state.statusMessage = "테마 삭제: " + name;
+                m_state.themeListDirty = true;
+            }
+            // 처음 상태로 되돌리기 (색 + 창별 설정 + 배경 이미지 전부)
+            if (m_state.themeResetRequested) {
+                m_state.themeResetRequested = false;
+                m_state.theme = themeDark();
+                for (int i = 0; i < kThemeWindowCount; ++i) {
+                    m_state.windowStyles[i] = WindowStyleOverride{};
+                    winBgTex[i].clear();
+                }
+                m_state.themeTargetWindow = -1;
+                applyThemeParams(m_state.theme);
+                reloadGlobalBg(); // bgImage가 비었으므로 텍스처도 정리된다
+                m_state.themeDirty = true;
+                m_state.statusMessage = "테마를 기본으로 되돌림";
+            }
+            // 테마를 한 파일로 내보내기 (배경 이미지까지 담아서)
+            if (!m_state.themeExportRequested.empty()) {
+                const std::string name = m_state.themeExportRequested;
+                m_state.themeExportRequested.clear();
+                // 저장해 둔 테마를 그대로 읽어 이미지를 담아 내보낸다
+                ThemeParams tmpT;
+                WindowStyleOverride tmpW[kThemeWindowCount];
+                if (loadTheme(tmpT, themePath(name), tmpW)) {
+                    // loadTheme은 스타일을 적용해 버리므로 현재 테마로 되돌린다
+                    applyThemeParams(m_state.theme);
+                    const std::string out = fileDialog(
+                        hwnd, true, L"MidiPro 테마 (*.mptheme)\0*.mptheme\0", L"mptheme");
+                    if (!out.empty()) {
+                        m_state.statusMessage =
+                            exportTheme(tmpT, tmpW, std::filesystem::u8path(out))
+                                ? ("테마 내보냄: " + name)
+                                : "테마 내보내기 실패";
+                    }
+                } else {
+                    m_state.statusMessage = "테마를 읽지 못했습니다: " + name;
+                }
+            }
+            // 받은 테마 파일 가져오기 (이미지를 풀어 경로를 이 PC 것으로 바꾼다)
+            if (m_state.themeImportRequested) {
+                m_state.themeImportRequested = false;
+                const std::string in = fileDialog(
+                    hwnd, false, L"MidiPro 테마 (*.mptheme)\0*.mptheme\0모든 파일\0*.*\0",
+                    L"mptheme");
+                if (!in.empty()) importThemeFile(std::filesystem::u8path(in));
+            }
+            if (m_state.themeListDirty) {
+                m_state.themeListDirty = false;
+                m_state.themeFiles.clear();
+                std::error_code ec;
+                if (fs::exists(dir, ec)) {
+                    for (const auto& e : fs::directory_iterator(dir, ec)) {
+                        if (!e.is_regular_file(ec)) continue;
+                        if (e.path().extension() != L".mptheme") continue;
+                        m_state.themeFiles.push_back(e.path().stem().string());
+                    }
+                    std::sort(m_state.themeFiles.begin(), m_state.themeFiles.end());
+                }
+            }
         }
 
         // 내보내기 창 첫 오픈 시 기본 저장 폴더 = 사용자 음악 폴더
@@ -1348,6 +1673,16 @@ int App::run() {
                     break;
                 }
             for (const std::string& path : g_droppedFiles) {
+                // 테마 파일을 떨어뜨리면 바로 적용한다 (남이 보내준 테마 쓰기)
+                {
+                    std::string lower = path;
+                    for (auto& ch : lower) ch = (char)tolower((unsigned char)ch);
+                    if (lower.size() > 8 &&
+                        lower.compare(lower.size() - 8, 8, ".mptheme") == 0) {
+                        importThemeFile(std::filesystem::u8path(path));
+                        continue;
+                    }
+                }
                 const std::vector<uint8_t> bytes = readFileBytes(path);
                 const std::size_t slash = path.find_last_of("\\/");
                 const std::string name =
@@ -1382,6 +1717,9 @@ int App::run() {
 
         // ---- 렌더 ----
         ImGui::Render();
+        // 버튼·탭·제목에 이미지 입히기: 다 그린 뒤 색을 열쇠로 찾아 UV를 갈아 끼운다
+        skinner.collectKeys(m_state.theme, m_state.windowStyles);
+        skinner.apply(ImGui::GetDrawData());
         const float clear[4] = {0.12f, 0.12f, 0.14f, 1.0f};
         g_context->OMSetRenderTargets(1, &g_rtv, nullptr);
         g_context->ClearRenderTargetView(g_rtv, clear);
@@ -1391,6 +1729,27 @@ int App::run() {
 
     // ---- 정리 ----
     if (m_state.player) m_state.player->stop();
+    // 지금 쓰던 MIDI 장치를 이름으로 남긴다 (다음 실행에서 그대로 열어 준다).
+    // 이름으로 저장하는 이유는 Settings.h 참고 (번호는 장치를 꽂으면 밀린다).
+    {
+        AppSettings out;
+        out.softThru = m_state.softThru;
+        if (m_state.input) {
+            const auto ports = m_state.input->listPorts();
+            out.midiInAutoOpen = m_state.input->isOpen();
+            if (m_state.selectedInputPort >= 0 &&
+                m_state.selectedInputPort < (int)ports.size())
+                out.midiInPort = ports[(std::size_t)m_state.selectedInputPort];
+        }
+        if (m_state.output) {
+            const auto ports = m_state.output->listPorts();
+            out.midiOutAutoOpen = m_state.output->isOpen();
+            if (m_state.selectedOutputPort >= 0 &&
+                m_state.selectedOutputPort < (int)ports.size())
+                out.midiOutPort = ports[(std::size_t)m_state.selectedOutputPort];
+        }
+        saveSettings(out, autosaveDir() / L"settings.ini");
+    }
     {
         // 정상 종료: 세션 락을 지워 다음 실행에서 복구를 묻지 않게 한다
         std::error_code ec;

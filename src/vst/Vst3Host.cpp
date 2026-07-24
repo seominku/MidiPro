@@ -55,12 +55,25 @@ private:
     HWND m_wnd = nullptr;
 };
 
+// 최소 컴포넌트 핸들러.
+// 규격상 호스트는 컨트롤러에 이걸 반드시 물려 줘야 한다. 큰 플러그인은 노브를
+// 잡는 순간(beginEdit) 호스트를 부르는데, 핸들러가 없으면 그대로 죽는 것들이 있다.
+// 우리는 오토메이션을 기록하지 않으므로 받기만 하고 성공만 돌려준다.
+class HostComponentHandler : public U::Implements<U::Directly<IComponentHandler>> {
+public:
+    tresult PLUGIN_API beginEdit(ParamID) override { return kResultOk; }
+    tresult PLUGIN_API performEdit(ParamID, ParamValue) override { return kResultOk; }
+    tresult PLUGIN_API endEdit(ParamID) override { return kResultOk; }
+    tresult PLUGIN_API restartComponent(int32) override { return kResultOk; }
+};
+
 struct Vst3Host::Impl {
     VST3::Hosting::Module::Ptr module;
     std::string path;
     std::vector<PluginClass> classes;
 
     IPtr<IHostApplication> hostContext;
+    IPtr<IComponentHandler> componentHandler;
     IPtr<IComponent> component;
     IPtr<IAudioProcessor> processor;
     IPtr<IEditController> controller;
@@ -94,6 +107,20 @@ struct Vst3Host::Impl {
     ProcessContext ctx{};
     std::array<float*, 2> inPtrs{nullptr, nullptr};
     std::array<float*, 2> outPtrs{nullptr, nullptr};
+
+    // ---- 다중 버스 대응 ----
+    // Omnisphere·Trilian·Keyscape처럼 멀티아웃 악기는 출력 버스가 여러 개다
+    // (메인 + 파트별 aux). VST3 규격상 호스트는 "플러그인이 가진 모든 버스"에
+    // 대해 AudioBusBuffers를 줘야 하고, 플러그인은 그 개수만큼 배열을 훑는다.
+    // 버스 하나만 넘기면 플러그인이 없는 배열 원소를 읽어 그대로 죽는다.
+    // 그래서 버스 개수만큼 자리를 만들고, 0번만 진짜 출력에 연결한다.
+    std::vector<AudioBusBuffers> outBuses;
+    std::vector<AudioBusBuffers> inBuses;
+    std::vector<std::vector<float*>> outBusPtrs; // 버스별 채널 포인터 배열
+    std::vector<std::vector<float*>> inBusPtrs;
+    std::vector<float> scratch;   // 쓰지 않는 버스가 뱉는 소리를 받아 버릴 곳
+    std::vector<float> silence;   // 쓰지 않는 입력 버스에 물릴 무음
+    int mainOutChannels = 2;
 
     // 에디터
     IPtr<IPlugView> view;
@@ -129,6 +156,7 @@ struct Vst3Host::Impl {
         }
         midiMapping = nullptr;
         if (controller) {
+            controller->setComponentHandler(nullptr); // 먼저 끊고 끝낸다
             controller->terminate();
             controller = nullptr;
         }
@@ -220,6 +248,11 @@ bool Vst3Host::instantiate(int classIndex, double sampleRate, int maxBlockSize, 
 
     // 컴포넌트 <-> 컨트롤러 연결 + 상태 전달
     if (m_impl->controller) {
+        // 핸들러부터 물려 준다 (연결/상태 전달 중에 부르는 플러그인이 있다)
+        if (!m_impl->componentHandler)
+            m_impl->componentHandler = owned(new HostComponentHandler());
+        m_impl->controller->setComponentHandler(m_impl->componentHandler);
+
         if (auto compICP = U::cast<IConnectionPoint>(m_impl->component))
             if (auto ctrlICP = U::cast<IConnectionPoint>(m_impl->controller)) {
                 compICP->connect(ctrlICP);
@@ -259,23 +292,39 @@ bool Vst3Host::instantiate(int classIndex, double sampleRate, int maxBlockSize, 
             }
     }
 
-    // 버스 구성
-    const bool hasAudioIn = m_impl->component->getBusCount(kAudio, kInput) > 0;
-    const bool hasAudioOut = m_impl->component->getBusCount(kAudio, kOutput) > 0;
+    // 버스 구성.
+    // 멀티아웃 악기(Omnisphere/Trilian/Keyscape 등)는 출력 버스가 여러 개다.
+    // 우리는 0번(메인)만 실제로 쓰지만, 규격상 나머지 버스에도 버퍼를 줘야 한다.
+    const int nInBus = m_impl->component->getBusCount(kAudio, kInput);
+    const int nOutBus = m_impl->component->getBusCount(kAudio, kOutput);
+    const bool hasAudioIn = nInBus > 0;
+    const bool hasAudioOut = nOutBus > 0;
     const bool hasEventIn = m_impl->component->getBusCount(kEvent, kInput) > 0;
     m_impl->hasAudioInput = hasAudioIn;
     m_impl->instrument = hasEventIn; // 이벤트 입력이 있으면 악기로 취급
 
+    if (!hasAudioOut) {
+        err = "오디오 출력 버스가 없는 플러그인입니다";
+        m_impl->teardownPlugin();
+        return false;
+    }
+
+    // 메인(0번)만 켜고 나머지 보조 출력은 끈다 — 끈 버스도 버퍼는 줘야 한다.
     if (hasAudioIn) m_impl->component->activateBus(kAudio, kInput, 0, true);
-    if (hasAudioOut) m_impl->component->activateBus(kAudio, kOutput, 0, true);
+    for (int b = 1; b < nInBus; ++b) m_impl->component->activateBus(kAudio, kInput, b, false);
+    m_impl->component->activateBus(kAudio, kOutput, 0, true);
+    for (int b = 1; b < nOutBus; ++b) m_impl->component->activateBus(kAudio, kOutput, b, false);
     if (hasEventIn) m_impl->component->activateBus(kEvent, kInput, 0, true);
 
-    SpeakerArrangement out = kStereoArr;
-    SpeakerArrangement in = kStereoArr;
-    if (hasAudioIn)
-        m_impl->processor->setBusArrangements(&in, 1, &out, 1);
-    else
-        m_impl->processor->setBusArrangements(nullptr, 0, &out, 1);
+    // 스피커 배치는 버스 개수만큼 넘겨야 한다 (개수가 다르면 플러그인이 거부한다).
+    {
+        std::vector<SpeakerArrangement> ins((std::size_t)(nInBus > 0 ? nInBus : 0), kStereoArr);
+        std::vector<SpeakerArrangement> outs((std::size_t)nOutBus, kStereoArr);
+        m_impl->processor->setBusArrangements(ins.empty() ? nullptr : ins.data(), nInBus,
+                                              outs.data(), nOutBus);
+        // 결과는 참고만 한다. 플러그인이 거부했어도 아래에서 "실제" 채널 수를
+        // 다시 물어보고 그 값에 맞춰 버퍼를 준비하므로 어긋날 일이 없다.
+    }
 
     ProcessSetup setup{};
     setup.processMode = kRealtime;
@@ -300,20 +349,56 @@ bool Vst3Host::instantiate(int classIndex, double sampleRate, int maxBlockSize, 
     m_impl->ctx = ProcessContext{};
     m_impl->ctx.sampleRate = sampleRate;
 
-    m_impl->outBus.numChannels = 2;
-    m_impl->outBus.silenceFlags = 0;
-    m_impl->outBus.channelBuffers32 = m_impl->outPtrs.data();
-    m_impl->inBus.numChannels = 2;
-    m_impl->inBus.silenceFlags = 0;
-    m_impl->inBus.channelBuffers32 = m_impl->inPtrs.data();
+    // 버스별 채널 수는 플러그인에게 직접 물어본다 (setBusArrangements가 거부됐을
+    // 수도 있으므로 "우리가 요청한 값"이 아니라 "실제 값"을 써야 안전하다).
+    auto busChannels = [&](BusDirection dir, int index) {
+        BusInfo bi{};
+        if (m_impl->component->getBusInfo(kAudio, dir, index, bi) == kResultOk)
+            return (int)bi.channelCount;
+        return 2;
+    };
+
+    // 안 쓰는 버스가 뱉는 소리를 받아 버릴 스크래치 / 물려 줄 무음 버퍼.
+    // 채널을 공유해도 된다 — 어차피 내용을 읽지 않는다.
+    m_impl->scratch.assign((std::size_t)maxBlockSize, 0.0f);
+    m_impl->silence.assign((std::size_t)maxBlockSize, 0.0f);
+
+    m_impl->outBusPtrs.clear();
+    m_impl->outBuses.clear();
+    m_impl->outBusPtrs.resize((std::size_t)nOutBus);
+    m_impl->outBuses.resize((std::size_t)nOutBus);
+    for (int b = 0; b < nOutBus; ++b) {
+        const int ch = busChannels(kOutput, b);
+        m_impl->outBusPtrs[(std::size_t)b].assign((std::size_t)(ch > 0 ? ch : 1), nullptr);
+        auto& bus = m_impl->outBuses[(std::size_t)b];
+        bus.numChannels = ch;
+        bus.silenceFlags = 0;
+        bus.channelBuffers32 = m_impl->outBusPtrs[(std::size_t)b].data();
+    }
+    m_impl->mainOutChannels = nOutBus > 0 ? m_impl->outBuses[0].numChannels : 2;
+
+    m_impl->inBusPtrs.clear();
+    m_impl->inBuses.clear();
+    if (nInBus > 0) {
+        m_impl->inBusPtrs.resize((std::size_t)nInBus);
+        m_impl->inBuses.resize((std::size_t)nInBus);
+        for (int b = 0; b < nInBus; ++b) {
+            const int ch = busChannels(kInput, b);
+            m_impl->inBusPtrs[(std::size_t)b].assign((std::size_t)(ch > 0 ? ch : 1), nullptr);
+            auto& bus = m_impl->inBuses[(std::size_t)b];
+            bus.numChannels = ch;
+            bus.silenceFlags = 0;
+            bus.channelBuffers32 = m_impl->inBusPtrs[(std::size_t)b].data();
+        }
+    }
 
     m_impl->data.processMode = kRealtime;
     m_impl->data.symbolicSampleSize = kSample32;
     m_impl->data.numSamples = 0;
-    m_impl->data.numInputs = hasAudioIn ? 1 : 0;
-    m_impl->data.numOutputs = 1;
-    m_impl->data.inputs = hasAudioIn ? &m_impl->inBus : nullptr;
-    m_impl->data.outputs = &m_impl->outBus;
+    m_impl->data.numInputs = nInBus;
+    m_impl->data.numOutputs = nOutBus;
+    m_impl->data.inputs = nInBus > 0 ? m_impl->inBuses.data() : nullptr;
+    m_impl->data.outputs = m_impl->outBuses.data();
     m_impl->data.inputParameterChanges = &m_impl->inParams;
     m_impl->data.outputParameterChanges = &m_impl->outParams;
     m_impl->data.inputEvents = &m_impl->eventList;
@@ -323,6 +408,38 @@ bool Vst3Host::instantiate(int classIndex, double sampleRate, int maxBlockSize, 
     m_impl->name = info.name();
     m_impl->loaded = true;
     return true;
+}
+
+bool Vst3Host::reconfigure(double sampleRate, int maxBlockSize) {
+    if (!m_impl->loaded || !m_impl->processor || !m_impl->component) return false;
+    if (maxBlockSize <= 0) return false;
+    // 값이 같으면 건드리지 않는다 (플러그인을 껐다 켜는 건 비싸다)
+    if (sampleRate == m_impl->sampleRate && maxBlockSize == m_impl->maxBlock) return true;
+
+    // setupProcessing은 "비활성 상태"에서만 부를 수 있다 (VST3 규격).
+    m_impl->processor->setProcessing(false);
+    m_impl->component->setActive(false);
+
+    ProcessSetup setup{};
+    setup.processMode = kRealtime;
+    setup.symbolicSampleSize = kSample32;
+    setup.maxSamplesPerBlock = maxBlockSize;
+    setup.sampleRate = sampleRate;
+    const bool ok = m_impl->processor->setupProcessing(setup) == kResultOk;
+
+    m_impl->component->setActive(true);
+    m_impl->processor->setProcessing(true);
+
+    if (ok) {
+        m_impl->sampleRate = sampleRate;
+        m_impl->maxBlock = maxBlockSize;
+        m_impl->ctx.sampleRate = sampleRate;
+        // 보조 버스용 버퍼도 새 블록 크기에 맞춘다
+        m_impl->scratch.assign((std::size_t)maxBlockSize, 0.0f);
+        m_impl->silence.assign((std::size_t)maxBlockSize, 0.0f);
+    }
+    // 실패해도 이전 설정 그대로 계속 돌아간다 (블록 수는 process에서 잘라 준다)
+    return ok;
 }
 
 void Vst3Host::unload() {
@@ -490,12 +607,31 @@ void Vst3Host::process(float** outputs, int numChannels, int frames, float** inp
     if (!m_impl->loaded || !m_impl->processor) return;
     if (frames > m_impl->maxBlock) frames = m_impl->maxBlock;
 
-    // 채널 버퍼 연결 (최대 2채널). 모자란 출력 채널은 첫 채널로 대체.
-    for (int c = 0; c < 2; ++c)
-        m_impl->outPtrs[c] = outputs[c < numChannels ? c : 0];
-    if (m_impl->data.numInputs > 0) {
-        for (int c = 0; c < 2; ++c)
-            m_impl->inPtrs[c] = inputs ? inputs[c < numChannels ? c : 0] : outputs[0];
+    // 0번(메인) 버스만 진짜 버퍼에 연결하고, 나머지 버스는 버리는 버퍼로 채운다.
+    // 규격상 모든 버스의 모든 채널 포인터가 유효해야 한다 — 하나라도 비면
+    // 플러그인이 그대로 죽는다 (멀티아웃 악기에서 실제로 터진 지점).
+    float* const junk = m_impl->scratch.data();
+    float* const quiet = m_impl->silence.data();
+
+    for (std::size_t b = 0; b < m_impl->outBuses.size(); ++b) {
+        auto& ptrs = m_impl->outBusPtrs[b];
+        for (std::size_t c = 0; c < ptrs.size(); ++c) {
+            if (b == 0)
+                ptrs[c] = outputs[(int)c < numChannels ? (int)c : 0];
+            else
+                ptrs[c] = junk; // 보조 출력은 받아서 버린다
+        }
+        m_impl->outBuses[b].silenceFlags = 0;
+    }
+    for (std::size_t b = 0; b < m_impl->inBuses.size(); ++b) {
+        auto& ptrs = m_impl->inBusPtrs[b];
+        for (std::size_t c = 0; c < ptrs.size(); ++c) {
+            if (b == 0 && inputs)
+                ptrs[c] = inputs[(int)c < numChannels ? (int)c : 0];
+            else
+                ptrs[c] = quiet; // 입력이 없으면 무음을 물린다
+        }
+        m_impl->inBuses[b].silenceFlags = 0;
     }
 
     m_impl->data.numSamples = frames;

@@ -288,10 +288,24 @@ struct AppState {
     bool showPianoRoll = true;
     bool showDrums = false;   // 드럼 트랙 에디터 (Tool 메뉴)
     bool showArrange = false; // 어레인지 뷰 (구간 블록 재배열, Tool 메뉴)
-    bool showTab = false;     // 타브 악보 창 (기타 트랙, Tool 메뉴)
+    bool showTab = false;     // '기타 연습' 창 (타브 + 연습 판정, Tool 메뉴)
     float tabZoom = 0.08f;    // 타브 악보 가로 확대 (px/tick)
-    // 타브 창에 함께 띄울 트랙들 (비어 있으면 선택 트랙 하나 — 기타 1·2 동시 보기용)
+    // 연습 창에 함께 띄울 트랙들 (비어 있으면 practiceTrack 하나 — 기타 1·2 동시 보기용)
     std::vector<int> tabTracks;
+    // '기타 연습' 창에서 고른 트랙 (song.tracks 인덱스, practice=true인 트랙).
+    // MIDI 쪽 selectedTrack과 별개다 — 두 창의 선택이 서로를 흔들지 않는다.
+    int practiceTrack = -1;
+
+    // ---- 연습 반주 (MP3/WAV) ----
+    // 반주는 연습 트랙 위의 보통 오디오 클립이다 — 레인에서 파형을 보며
+    // 드래그해 악보와 맞추고, 재생·볼륨·뮤트는 트랙 기능을 그대로 쓴다.
+    // 여기엔 "다시 늘릴 때 쓸 원본"과 템포 정보만 들고 있는다.
+    std::shared_ptr<audio::AudioClip> practiceBacking;     // 원본 (스트레치 안 된 것)
+    std::shared_ptr<audio::AudioClip> practiceBackingClip; // 트랙에 올라간 재생본
+    double practiceBackingBpm = 120.0; // 이 음원의 원래 템포 (사용자가 입력)
+    // practiceBackingClip을 만든 배율(원본BPM/곡BPM). 곡 템포든 원본 BPM이든
+    // 바뀌면 필요 배율이 달라지므로, 둘 중 뭘 고쳐도 "다시 맞춰야 함"이 잡힌다.
+    double practiceBackingMadeRatio = 0.0; // 0 = 아직 없음
     float drumZoom = 0.08f;  // 드럼 에디터 가로 확대 (px/tick)
     int drumSnap = 1;        // 격자: 0=8분, 1=16분, 2=32분
     int drumSwing = 54;      // 스윙 % (적용 버튼으로 사용)
@@ -349,6 +363,37 @@ struct AppState {
     ThemeParams theme;              // 현재 테마 파라미터 (시작 시 파일에서 복원)
     bool showStyleEditor = false;   // 고급 스타일 편집기(ImGui 내장) 창
     bool themeDirty = false;        // 변경됨 -> App이 테마 파일에 저장
+    // 배경 이미지: 실제 파일 열기/디코드는 DX11 장치를 가진 App이 처리한다
+    bool bgImageOpenRequested = false;  // 파일 대화상자를 열어 달라
+    bool bgImageClearRequested = false; // (사용 안 함 — 레이어 삭제로 대체)
+    int bgImageTargetWindow = -1;       // 요청 대상 (-1 = 전체 배경, 0.. = 그 창)
+    char bgImageInfo[64] = "";          // 첫 레이어 크기 표시용
+    // 레이어 목록이 바뀌어 텍스처를 다시 맞춰야 함:
+    // -1=없음, 0=전체 배경, 1+n=n번 창
+    int bgLayersDirty = -1;
+    int bgLayerSel = 0;                 // 목록에서 고른 레이어
+    // 위젯 스킨(버튼·탭·제목 표시줄 이미지, 모든 창 공통)
+    bool skinImageOpenRequested = false;
+    int skinImageSlot = 0;              // kSkinButton / kSkinTab / kSkinTitle
+    // 창별 스타일 오버라이드 (켜지 않은 항목은 전체 테마를 상속)
+    WindowStyleOverride windowStyles[kThemeWindowCount];
+    int themeTargetWindow = -1; // 테마 탭의 '적용 대상' (-1 = 전체)
+
+    // ---- 내 테마 (전체 + 창별 설정을 통째로 이름 붙여 저장) ----
+    // 파일 입출력은 저장 폴더를 아는 App이 처리한다 (요청 플래그 방식).
+    char themeSaveName[64] = "";        // 저장할 이름
+    bool themeSaveRequested = false;
+    std::string themeLoadRequested;     // 불러올 테마 이름
+    std::string themeDeleteRequested;   // 지울 테마 이름
+    std::vector<std::string> themeFiles; // 저장된 테마 목록 (App이 채운다)
+    bool themeListDirty = true;          // 목록을 다시 읽어 달라
+    // 공유: 한 파일로 내보내기 / 받은 파일 가져오기 (배경 이미지 포함)
+    std::string themeExportRequested; // 내보낼 테마 이름
+    bool themeImportRequested = false;
+    // 테마 탭을 얼마나 펼쳐 보일지 (0=기본 1=자세히 2=고급).
+    // 처음 쓰는 사람에게 선택지를 한꺼번에 들이밀지 않으려는 장치.
+    int themeUiLevel = 0;
+    bool themeResetRequested = false; // 색·창별·배경을 처음 상태로
 
     // 상태 표시줄 메시지
     std::string statusMessage = "준비됨";
@@ -444,6 +489,13 @@ struct AppState {
     // 피아노 롤 스케일 하이라이트: 조성 구성음 행을 초록빛으로 표시
     int scaleRoot = 0; // 0=C, 1=C#, ... 11=B
     int scaleType = 0; // 0=끄기, 1=메이저, 2=마이너(내추럴)
+
+    // 코드 찾기: 선택 트랙 멜로디를 분석해 조성 + 마디별 코드를 얻어 피아노 롤
+    // 마디 위에 표시한다. (분석 시점의 결과를 담아두는 캐시 — 자동 갱신 아님)
+    bool showChords = false;             // 마디 위 코드 표시 on/off
+    std::string chordKeyName;            // 판별된 조성 (예: "C", "Am")
+    int chordTrack = -1;                 // 어느 트랙을 분석했는지
+    std::vector<std::pair<int, std::string>> barChords; // (마디 인덱스, 코드 이름)
 
     // 클릭 음량 (메트로놈/카운트인 각각, 0=무음 ~ 1.5=크게)
     float metroVolume = 1.0f;

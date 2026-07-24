@@ -10,6 +10,7 @@
 #include "midi/MidiConstants.h"
 #include "midi/MidiMessage.h"
 #include "sequencer/TimeBase.h"
+#include "sequencer/ChordFinder.h"
 #include "sequencer/Track.h"
 
 #include "imgui.h"
@@ -27,6 +28,7 @@ namespace midipro::gui {
 void drawPianoRoll(AppState& state) {
     if (!state.showPianoRoll) return;
     ImGui::Begin("피아노 롤", &state.showPianoRoll);
+    drawPendingWindowBackground(); // 창별 배경 이미지 (예약이 있으면)
 
     ImGui::SetNextItemWidth(160);
     ImGui::SliderFloat("확대", &state.pianoRollZoom, 0.02f, 2.0f, "%.2f px/tick");
@@ -146,6 +148,46 @@ void drawPianoRoll(AppState& state) {
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("다른 트랙들의 노트를 흐리게 겹쳐 보여줍니다\n"
                               "(화음/베이스 라인을 맞춰 찍을 때)");
+        // ── 코드 찾기: 멜로디 → 조성 + 마디별 코드 추천 ──
+        ImGui::SameLine();
+        if (ImGui::Button("코드 찾기") &&
+            state.selectedTrack < (int)state.song.tracks.size()) {
+            const auto& tr = state.song.tracks[(std::size_t)state.selectedTrack];
+            std::vector<seq::MelNote> mel;
+            for (const auto& n : seq::extractNotes(tr))
+                mel.push_back({n.note, n.startTick,
+                               n.endTick > n.startTick ? n.endTick - n.startTick : 1u});
+            if (mel.empty()) {
+                state.showChords = false;
+                state.statusMessage = "이 트랙에 멜로디 노트가 없습니다";
+            } else {
+                const seq::MusicKey key = seq::detectKey(mel);
+                seq::ChordRecoOptions opt;
+                opt.ticksPerBar = songTicksPerBar(state);
+                opt.minNoteTicks = songTicksPerBeat(state) / 4; // 16분음표 미만 제외
+                const auto rec = seq::recommendChords(mel, key, opt);
+                state.chordKeyName = seq::keyName(key);
+                state.barChords.clear();
+                for (const auto& bc : rec)
+                    state.barChords.push_back({bc.bar, seq::chordName(bc.chord)});
+                state.chordTrack = state.selectedTrack;
+                state.showChords = true;
+                state.statusMessage = "조성 " + state.chordKeyName + " · 마디 " +
+                                      std::to_string(rec.size()) + "개 코드 추천";
+            }
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("선택 트랙의 멜로디를 분석해 조성과 마디별 코드를\n"
+                              "추천합니다. 결과가 마디 위에 표시됩니다.");
+        if (state.showChords) {
+            ImGui::SameLine();
+            ImGui::Checkbox("코드 표시##pr", &state.showChords);
+            if (!state.chordKeyName.empty()) {
+                ImGui::SameLine();
+                ImGui::TextColored(ImVec4(0.6f, 0.85f, 1.0f, 1.0f), "조성 %s",
+                                   state.chordKeyName.c_str());
+            }
+        }
     }
     if (state.editMode)
         ImGui::TextDisabled(
@@ -194,29 +236,35 @@ void drawPianoRoll(AppState& state) {
     // 아래 kVelLaneH만큼은 벨로시티/CC 레인이 쓴다 (편집 모드에서만).
     // 위 헤더(콤보) 높이를 빼고도 조절 영역이 충분하도록 넉넉히 잡는다.
     const float kVelLaneH = state.editMode ? 100.0f : 0.0f;
+
+    constexpr int kLowNote = 36;  // C2
+    constexpr int kHighNote = 84; // C6
+    constexpr float kRulerH = 22.0f; // 상단 눈금자(마디번호) 높이
+    constexpr float kKeyW = 46.0f;   // 왼쪽 고정 건반 열 폭
+    // 행 높이는 글자(라벨)가 잘리지 않도록 폰트 줄 높이 이상으로 잡는다.
+    const float kRowHeight = std::max(15.0f, ImGui::GetTextLineHeight() + 3.0f);
+    const int rows = kHighNote - kLowNote;
+    const float gridH = rows * kRowHeight;
+    const float contentH = kRulerH + gridH;
+
+    // 왼쪽 고정 건반 열을 위해 격자 캔버스를 오른쪽으로 밀어 시작한다.
+    // (건반을 캔버스 위에 겹쳐 그리면 스크롤할 때 노트를 가리므로 열을 나눈다)
+    const ImVec2 keysPos = ImGui::GetCursorPos(); // 건반 열이 놓일 자리 (창 좌표)
+    ImGui::SetCursorPosX(keysPos.x + kKeyW);
     ImGui::BeginChild("roll_canvas", ImVec2(0, -kVelLaneH), true,
                       ImGuiWindowFlags_HorizontalScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
 
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const ImVec2 origin = ImGui::GetCursorScreenPos();
-
-    constexpr int kLowNote = 36;  // C2
-    constexpr int kHighNote = 84; // C6
-    // 행 높이는 글자(라벨)가 잘리지 않도록 폰트 줄 높이 이상으로 잡는다.
-    const float kRowHeight = std::max(15.0f, ImGui::GetTextLineHeight() + 3.0f);
     const float zoom = state.pianoRollZoom;
 
-    const int rows = kHighNote - kLowNote;
     // 표시 길이는 공용 타임라인 마디 수(오디오 길이 포함, 끝 5마디 전 20마디 여유)
     const uint32_t tpbForLen = songTicksPerBar(state);
     const uint32_t songLen = state.timelineBars * tpbForLen;
     // 좌우로 꽉 차게: 그래도 창보다 좁으면 창 폭까지 배경을 채운다
     const float availW = ImGui::GetContentRegionAvail().x;
     const float contentW = std::max(songLen * zoom + 40.0f, availW);
-    constexpr float kRulerH = 22.0f;          // 상단 눈금자(마디번호) 높이
     const float gridTop = origin.y + kRulerH; // 노트 격자는 눈금자 아래부터
-    const float gridH = rows * kRowHeight;
-    const float contentH = kRulerH + gridH;
 
     // 마우스 휠: 기본은 확대/축소(커서 기준), Shift = 세로 스크롤, Ctrl = 가로 스크롤.
     if (ImGui::IsWindowHovered()) {
@@ -297,6 +345,19 @@ void drawPianoRoll(AppState& state) {
         char buf[8];
         std::snprintf(buf, sizeof(buf), "%d", barNo);
         dl->AddText(ImVec2(x + 3, origin.y + 3), IM_COL32(200, 200, 215, 255), buf);
+        // 코드 찾기 결과: 그 마디의 추천 코드를 마디 번호 옆에 표시
+        if (state.showChords) {
+            for (const auto& bc : state.barChords)
+                if (bc.first == barNo - 1) {
+                    const float cw = ImGui::CalcTextSize(bc.second.c_str()).x;
+                    dl->AddRectFilled(ImVec2(x + 15, origin.y + 2),
+                                      ImVec2(x + 20 + cw, origin.y + 2 + kRulerH * 0.55f),
+                                      IM_COL32(40, 60, 90, 220), 2.0f);
+                    dl->AddText(ImVec2(x + 18, origin.y + 3),
+                                IM_COL32(150, 210, 255, 255), bc.second.c_str());
+                    break;
+                }
+        }
     }
 
     // 루프 구간 음영 + 경계선
@@ -315,6 +376,7 @@ void drawPianoRoll(AppState& state) {
     if (state.ghostNotes) {
         for (int gt = 0; gt < (int)state.song.tracks.size(); ++gt) {
             if (gt == state.selectedTrack) continue;
+            if (state.song.tracks[(std::size_t)gt].practice) continue; // 연습 트랙 제외
             const auto ghost = seq::extractNotes(state.song.tracks[(std::size_t)gt]);
             for (const auto& n : ghost) {
                 if (n.note < kLowNote || n.note >= kHighNote) continue;
@@ -341,11 +403,25 @@ void drawPianoRoll(AppState& state) {
         const float vb = 0.4f + 0.6f * (float)n.velocity / 127.0f;
         const ImU32 fill = isSel ? IM_COL32((int)(250 * vb), (int)(200 * vb), (int)(90 * vb), 255)
                                  : IM_COL32((int)(90 * vb), (int)(170 * vb), (int)(250 * vb), 255);
-        dl->AddRectFilled(ImVec2(x0, y0 + 1), ImVec2(std::max(x1, x0 + 2), y0 + kRowHeight - 1),
-                          fill, 2.0f);
-        dl->AddRect(ImVec2(x0, y0 + 1), ImVec2(std::max(x1, x0 + 2), y0 + kRowHeight - 1),
+        const float rx1 = std::max(x1, x0 + 2);
+        dl->AddRectFilled(ImVec2(x0, y0 + 1), ImVec2(rx1, y0 + kRowHeight - 1), fill, 2.0f);
+        dl->AddRect(ImVec2(x0, y0 + 1), ImVec2(rx1, y0 + kRowHeight - 1),
                     isSel ? IM_COL32(255, 240, 200, 255) : IM_COL32(200, 220, 255, 255), 2.0f,
                     0, isSel ? 2.0f : 1.0f);
+        // 음이름(C4·F#3 등)을 노트 위에 얹는다 — 블록이 글자보다 넓고 행이
+        // 글자 높이를 담을 때만. 좁으면 생략해 격자가 지저분해지지 않게.
+        if (kRowHeight >= 9.0f) {
+            const std::string nm = noteName(n.note);
+            const ImVec2 ts = ImGui::CalcTextSize(nm.c_str());
+            if (rx1 - x0 >= ts.x + 5.0f) {
+                const float tx = x0 + 3.0f;
+                const float ty = y0 + (kRowHeight - ts.y) * 0.5f;
+                // 채움 위 가독성: 밝은(선택) 블록엔 어두운 글자, 아니면 밝은 글자
+                dl->AddText(ImVec2(tx, ty),
+                            isSel ? IM_COL32(40, 30, 10, 255) : IM_COL32(235, 245, 255, 255),
+                            nm.c_str());
+            }
+        }
     }
 
     // 선택 트랙의 오디오 클립들 (어두운 블록 + 파형)
@@ -359,24 +435,6 @@ void drawPianoRoll(AppState& state) {
     // 템포 변경 지점 (주황 세로선 + BPM 라벨)
     drawTempoMarkers(dl, state.song, origin.x, zoom, gridTop, gridTop + gridH, true,
                      state.selectedTempoMarker);
-
-    // 옥타브 C 라벨: 격자/노트를 다 그린 뒤 맨 위에 올려 잘리지 않게 한다.
-    // 스크롤과 무관하게 항상 보이도록 뷰 왼쪽 가장자리에 붙인다(고정 건반 열처럼).
-    {
-        const float labelDY = (kRowHeight - ImGui::GetTextLineHeight()) * 0.5f;
-        const float labelX = origin.x + ImGui::GetScrollX() + 2.0f;
-        for (int r = 0; r < rows; ++r) {
-            const int note = kHighNote - r;
-            if (note % 12 != 0) continue; // C만
-            const float y = gridTop + r * kRowHeight + labelDY;
-            char buf[8];
-            std::snprintf(buf, sizeof(buf), "%s", noteName((uint8_t)note).c_str());
-            const ImVec2 ts = ImGui::CalcTextSize(buf);
-            dl->AddRectFilled(ImVec2(labelX - 1, y), ImVec2(labelX + ts.x + 2, y + ts.y),
-                              IM_COL32(18, 18, 22, 210)); // 가독성용 어두운 배경
-            dl->AddText(ImVec2(labelX, y), IM_COL32(215, 215, 230, 255), buf);
-        }
-    }
 
     // 재생 헤드(플레이헤드): 정지 중에도 항상 그린다. 눈금자엔 드래그용 손잡이.
     {
@@ -405,6 +463,7 @@ void drawPianoRoll(AppState& state) {
             ImGui::SetScrollX(std::max(0.0f, scrollTarget));
         }
     }
+
 
     // 눈금자 시크: 눈금자 영역을 드래그해 재생 위치를 지정한다.
     ImGui::SetCursorScreenPos(origin);
@@ -764,7 +823,92 @@ void drawPianoRoll(AppState& state) {
         ImGui::SetScrollY(std::max(0.0f, ImGui::GetScrollY() + state.keyScrollY));
 
     const float canvasScrollX = ImGui::GetScrollX(); // 벨로시티 레인과 가로 동기화
+    // 건반 열이 격자 행과 정확히 맞도록 캔버스의 실제 행 시작 화면 좌표를 넘긴다
+    // (스크롤 값을 따로 맞추면 한 프레임 어긋난다)
+    const float canvasGridTopY = gridTop;
     ImGui::EndChild();
+
+    // ── 왼쪽 고정 피아노 건반 열 ──
+    // 어느 행이 어떤 음인지 한눈에 보이도록 실제 건반 모양으로 그린다.
+    // 캔버스와 별도 열이라 가로 스크롤을 해도 노트를 가리지 않는다. 세로
+    // 스크롤은 캔버스 값을 그대로 따라간다(같은 프레임에 맞추려고 뒤에 그린다).
+    // 클릭하면 그 음을 미리듣기 한다.
+    {
+        const ImVec2 afterPos = ImGui::GetCursorPos(); // 캔버스 다음 자리 (복원용)
+        ImGui::SetCursorPos(keysPos);
+        ImGui::BeginChild("roll_keys", ImVec2(kKeyW, -kVelLaneH), true,
+                          ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+        ImDrawList* kdl = ImGui::GetWindowDrawList();
+        const ImVec2 kp = ImGui::GetCursorScreenPos();
+        // 캔버스가 알려준 행 시작 위치를 그대로 쓴다 — 세로 스크롤을 해도
+        // 건반과 격자 행이 같은 프레임에 정확히 맞는다. 열 밖은 자동 클립.
+        const float kTop = canvasGridTopY;
+        const float blackW = kKeyW * 0.62f;
+        auto isBlack = [](int n) {
+            const int pc = ((n % 12) + 12) % 12;
+            return pc == 1 || pc == 3 || pc == 6 || pc == 8 || pc == 10;
+        };
+        // 배경 (눈금자 줄과 건반 위/아래 여백)
+        kdl->AddRectFilled(ImVec2(kp.x, kp.y), ImVec2(kp.x + kKeyW, kp.y + contentH),
+                           IM_COL32(30, 30, 34, 255));
+        // 1) 흰건반: 검은건반 행까지 덮도록 먼저 전체를 흰색으로
+        kdl->AddRectFilled(ImVec2(kp.x, kTop), ImVec2(kp.x + kKeyW, kTop + gridH),
+                           IM_COL32(238, 238, 242, 255));
+        // 2) 흰건반 경계선: 검은건반이 끼지 않은 자리(E-F, B-C)에만 실선
+        for (int r = 0; r <= rows; ++r) {
+            const int above = kHighNote - r;
+            if (r > 0 && r < rows && (isBlack(above) || isBlack(above - 1))) continue;
+            const float y = kTop + r * kRowHeight;
+            kdl->AddLine(ImVec2(kp.x, y), ImVec2(kp.x + kKeyW, y), IM_COL32(150, 150, 158, 255));
+        }
+        // 3) 검은건반: 짧고 어둡게 위에 얹는다
+        for (int r = 0; r < rows; ++r) {
+            const int note = kHighNote - r;
+            if (!isBlack(note)) continue;
+            const float y = kTop + r * kRowHeight;
+            kdl->AddRectFilled(ImVec2(kp.x, y + 1.0f),
+                               ImVec2(kp.x + blackW, y + kRowHeight - 1.0f),
+                               IM_COL32(28, 28, 34, 255), 2.0f);
+        }
+        // 4) 옥타브 C 이름 (흰건반 오른쪽 끝 — 검은건반과 겹치지 않는 자리)
+        {
+            const float dy = (kRowHeight - ImGui::GetTextLineHeight()) * 0.5f;
+            for (int r = 0; r < rows; ++r) {
+                const int note = kHighNote - r;
+                if (note % 12 != 0) continue; // C만
+                const std::string nm = noteName((uint8_t)note);
+                const ImVec2 ts = ImGui::CalcTextSize(nm.c_str());
+                kdl->AddText(ImVec2(kp.x + kKeyW - ts.x - 3.0f, kTop + r * kRowHeight + dy),
+                             IM_COL32(40, 40, 48, 255), nm.c_str());
+            }
+        }
+        // 5) 클릭 = 미리듣기, 호버 = 그 건반 강조.
+        //    입력 영역은 열의 보이는 범위 전체 (행 계산은 kTop 기준이라 스크롤 반영)
+        ImGui::SetCursorScreenPos(kp);
+        ImGui::InvisibleButton("keys_input", ImVec2(kKeyW, std::max(1.0f, contentH)));
+        if (ImGui::IsItemHovered()) {
+            const float my = ImGui::GetIO().MousePos.y;
+            const int r = (int)std::floor((my - kTop) / kRowHeight);
+            if (r >= 0 && r < rows) {
+                const int note = kHighNote - r;
+                const float y = kTop + r * kRowHeight;
+                kdl->AddRectFilled(ImVec2(kp.x, y + 1.0f),
+                                   ImVec2(kp.x + (isBlack(note) ? blackW : kKeyW),
+                                          y + kRowHeight - 1.0f),
+                                   IM_COL32(120, 180, 255, 110), 2.0f);
+                ImGui::SetTooltip("%s", noteName((uint8_t)note).c_str());
+                if (ImGui::IsItemClicked(ImGuiMouseButton_Left))
+                    triggerNote(state, track.channel, (uint8_t)note, 100, 0.5);
+            }
+        }
+        ImGui::EndChild();
+        // 커서를 캔버스 다음 자리로 되돌린다. 되돌린 뒤에는 아이템을 하나
+        // 제출해야 창 경계가 그 자리까지 자란다 — 편집 모드가 꺼져 있으면
+        // 아래 레인이 없어 아무 아이템도 안 나오고, 그러면 ImGui가
+        // "SetCursorPos 뒤에 Dummy를 넣으라"며 단언에 걸린다.
+        ImGui::SetCursorPos(afterPos);
+        ImGui::Dummy(ImVec2(0.0f, 0.0f));
+    }
 
     // ── 아래 레인 (편집 모드): 벨로시티 막대 또는 CC 곡선 (콤보로 전환) ──
     // 캔버스 밖의 고정 높이 영역이라 세로 스크롤과 무관하게 항상 보인다.

@@ -72,9 +72,13 @@ public:
     }
 
     // 이 번들에 인서트 이펙트로 쓸 수 있는 클래스가 있는가 (악기 전용이면 false).
-    // GUI가 트랙 이펙트 목록을 거르는 데 쓴다. 모듈만 열어 보고 닫는다.
+    // GUI가 트랙 이펙트/악기 목록을 거르는 데 쓴다.
+    // 판정하려면 플러그인을 실제로 열어 봐야 해서 느리다(큰 악기는 몇 초씩).
+    // 그래서 결과를 디스크에 기억해 두고, 두 번째 실행부터는 즉시 답한다.
     virtual bool pluginHasEffectClass(const std::string& path) = 0;
     virtual bool pluginHasInstrumentClass(const std::string& path) = 0;
+    // 기억해 둔 조사 결과를 버린다 (다음 조회 때 다시 열어 본다).
+    virtual void clearPluginCache() = 0;
 
     // ---- 트랙별 악기 (트랙 = MIDI 채널 0~15, 슬롯 1개) ----
     // 로드하면 그 채널의 노트가 이 악기로 라우팅되고, 출력은 그 트랙 버스를

@@ -27,6 +27,7 @@
 #include "audio/Synth.h"
 #include "core/SpscQueue.h"
 #include "midi/IMidiDevice.h"
+#include "vst/PluginCache.h"
 #include "vst/Vst3Host.h"
 
 #include <array>
@@ -266,6 +267,8 @@ public:
     int trackEffectSidechain(int channel, int index) const override;
     bool pluginHasEffectClass(const std::string& path) override;
     bool pluginHasInstrumentClass(const std::string& path) override;
+    // 조사 결과 캐시를 비운다 (플러그인을 바꿔 끼웠는데 자동 감지가 안 될 때).
+    void clearPluginCache() override;
     bool loadTrackInstrument(int channel, const std::string& path, int classIndex,
                              std::string& err) override;
     void clearTrackInstrument(int channel) override;
@@ -414,6 +417,14 @@ private:
 
     StreamSuspend suspendStreams();
     void resumeStreams(const StreamSuspend& s);
+    // 스트림이 열려 샘플레이트/블록 크기가 정해진 직후, 이미 올라와 있는
+    // VST들에게 바뀐 조건을 알린다 (오디오 스레드가 없는 시점에만 호출).
+    void reconfigurePlugins();
+    // 플러그인 종류 조사 + 그 결과 캐시 (모듈을 여는 게 느려서 디스크에 남긴다)
+    vst::PluginKinds pluginKinds(const std::string& path);
+    static std::string pluginCachePath();
+    vst::PluginCache m_pluginCache;
+    bool m_pluginCacheLoaded = false;
     StreamSuspend m_offlineSuspend; // 오프라인 렌더 동안 멈춘 스트림 상태
     std::atomic<bool> m_open{false};
     std::atomic<bool> m_mpeEnabled{false};

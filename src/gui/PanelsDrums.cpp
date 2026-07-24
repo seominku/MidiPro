@@ -15,6 +15,7 @@
 #include "core/PathUtf8.h"
 #include "midi/MidiConstants.h"
 #include "sequencer/TimeBase.h"
+#include "sequencer/DrumPattern.h"
 #include "sequencer/Track.h"
 
 #include "imgui.h"
@@ -237,12 +238,20 @@ static void drawDrumKitPopup(AppState& state) {
     ImGui::EndPopup();
 }
 
-// 라이브러리 루트 결정: src/Drum이 없으면(exe를 build\에서 실행) 한 단계 위를 본다
+// 라이브러리 루트 결정.
+//  1) 실행 폴더의 src/Drum
+//  2) 한 단계 위 (exe를 build\에서 바로 실행할 때)
+//  3) %LOCALAPPDATA%\MidiPro\Drum — 설치본은 Program Files 아래라 폴더를 넣으려면
+//     관리자 권한이 필요하므로, 샘플을 나중에 넣을 수 있는 자리를 하나 더 둔다.
 static std::string drumLibRoot() {
     namespace fs = std::filesystem;
     std::error_code ec;
     if (fs::exists(kDrumLibDir, ec)) return kDrumLibDir;
     if (fs::exists("../src/Drum", ec)) return "../src/Drum";
+    if (const char* la = std::getenv("LOCALAPPDATA")) {
+        const std::string user = std::string(la) + "\\MidiPro\\Drum";
+        if (fs::exists(user, ec)) return user;
+    }
     return kDrumLibDir;
 }
 
@@ -403,6 +412,7 @@ void drawDrums(AppState& state) {
         ImGui::End();
         return;
     }
+    drawPendingWindowBackground(); // 창별 배경 이미지 (예약이 있으면)
 
     // ── 드럼 트랙 찾기: 선택 트랙이 채널 10이면 그것, 아니면 안내 ──
     int di = -1;
@@ -412,7 +422,8 @@ void drawDrums(AppState& state) {
     if (di < 0) {
         int firstDrum = -1;
         for (int i = 0; i < (int)state.song.tracks.size(); ++i)
-            if ((state.song.tracks[(std::size_t)i].channel & 0x0F) == 9) {
+            if ((state.song.tracks[(std::size_t)i].channel & 0x0F) == 9 &&
+                !state.song.tracks[(std::size_t)i].practice) {
                 firstDrum = i;
                 break;
             }
@@ -471,6 +482,61 @@ void drawDrums(AppState& state) {
         ImGui::SetTooltip("엇박(짝수 격자 칸)을 뒤로 밀어 그루브를 만듭니다.\n"
                           "0%%=정직, 100%%=셋잇단 느낌. 선택이 있으면 선택만, 없으면 전체.\n"
                           "언두(Ctrl+Z)로 되돌릴 수 있습니다.");
+    ImGui::SameLine();
+    if (ImGui::Button("패턴 채우기")) ImGui::OpenPopup("drumpat");
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("박자표와 스타일을 고르면 드럼 패턴을 자동으로 채웁니다.\n"
+                          "재생 헤드가 있는 마디부터 채우고, 그 구간은 먼저 비웁니다.");
+    if (ImGui::BeginPopup("drumpat")) {
+        static int s_patSig = -1;   // -1 = 곡 박자표 따라감
+        static int s_patStyle = 0;
+        static int s_patBars = 4;
+        static bool s_patSetSig = true;
+        ImGui::TextUnformatted("드럼 패턴 자동 생성");
+        ImGui::Separator();
+        ImGui::SetNextItemWidth(120);
+        const char* kSigs[] = {"곡 박자표", "4/4", "3/4", "6/8"};
+        int sigSel = s_patSig + 1; // -1..2 → 0..3
+        if (ImGui::Combo("박자표##pat", &sigSel, kSigs, 4)) s_patSig = sigSel - 1;
+        ImGui::SetNextItemWidth(120);
+        const char* kStyles[] = {seq::drumStyleName(0), seq::drumStyleName(1),
+                                 seq::drumStyleName(2)};
+        ImGui::Combo("스타일##pat", &s_patStyle, kStyles, seq::drumStyleCount());
+        ImGui::SetNextItemWidth(120);
+        ImGui::SliderInt("마디 수##pat", &s_patBars, 1, 32, "%d마디");
+        ImGui::Checkbox("박자표도 이 값으로 설정##pat", &s_patSetSig);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("4/4·3/4·6/8을 고르면 곡의 박자표도 맞춰 바꿉니다\n"
+                              "(마디선·메트로놈이 어긋나지 않게).");
+        ImGui::Separator();
+        if (ImGui::Button("채우기##patgo", ImVec2(120, 0))) {
+            const int sig = s_patSig < 0 ? state.metroSigIndex : s_patSig;
+            if (s_patSetSig && s_patSig >= 0) state.metroSigIndex = s_patSig;
+            state.snapshot();
+            const uint32_t tpbP = songTicksPerBar(state);
+            const uint32_t startB = (state.playPosTick / tpbP) * tpbP;
+            const uint32_t endB = startB + (uint32_t)s_patBars * tpbP;
+            // 채울 구간의 기존 드럼 노트를 먼저 지운다 (덮어쓰기)
+            seq::eraseMidiRange(track, startB, endB);
+            const auto hits = seq::generateDrumPattern(sig, s_patStyle,
+                                                       (uint32_t)state.song.ppqn,
+                                                       s_patBars, startB);
+            const uint32_t nd = std::max<uint32_t>(1, (uint32_t)state.song.ppqn / 4);
+            for (const auto& h : hits) {
+                track.addNote(h.tick, nd, h.note, h.velocity);
+                seq::adoptNoteIntoClips(track, h.note, h.tick);
+            }
+            track.sortEvents();
+            refreshPlaybackIfPlaying(state);
+            state.statusMessage = std::string("드럼 패턴 채움: ") +
+                                  seq::drumStyleName(s_patStyle) + " · " +
+                                  std::to_string(s_patBars) + "마디";
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("취소##pat")) ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
     ImGui::SameLine();
     if (ImGui::Button("킷##kit")) ImGui::OpenPopup("drumkit");
     if (ImGui::IsItemHovered())

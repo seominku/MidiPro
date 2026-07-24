@@ -1,3 +1,40 @@
-// MidiPro 리소스: 실행 파일/창 아이콘
+// MidiPro 리소스: 실행 파일/창 아이콘 + 버전 정보
 // (rc.exe로 컴파일해 링크에 포함 — build.bat 참고)
+// 버전을 올릴 때는 installer\MidiPro.iss의 AppVersion과 함께 맞춘다.
 1 ICON "app.ico"
+
+#include <winver.h>
+
+#define MP_VER_MAJOR 1
+#define MP_VER_MINOR 2
+#define MP_VER_PATCH 0
+#define MP_VER_STR   "1.2.0"
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION    MP_VER_MAJOR, MP_VER_MINOR, MP_VER_PATCH, 0
+PRODUCTVERSION MP_VER_MAJOR, MP_VER_MINOR, MP_VER_PATCH, 0
+FILEFLAGSMASK  VS_FFI_FILEFLAGSMASK
+FILEFLAGS      0
+FILEOS         VOS_NT_WINDOWS32
+FILETYPE       VFT_APP
+FILESUBTYPE    VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        // 0412 = 한국어, 04B0 = 유니코드(1200)
+        BLOCK "041204B0"
+        BEGIN
+            VALUE "CompanyName",      "seominku"
+            VALUE "FileDescription",  "MidiPro"
+            VALUE "FileVersion",      MP_VER_STR
+            VALUE "InternalName",     "MidiPro"
+            VALUE "OriginalFilename", "MidiPro.exe"
+            VALUE "ProductName",      "MidiPro"
+            VALUE "ProductVersion",   MP_VER_STR
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x412, 1200
+    END
+END

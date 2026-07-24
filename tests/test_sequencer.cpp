@@ -6,6 +6,8 @@
 // =============================================================
 
 #include "pdf/PdfTab.h"
+#include "sequencer/ChordFinder.h"
+#include "sequencer/DrumPattern.h"
 #include "sequencer/SmfFile.h"
 #include "sequencer/Song.h"
 #include "sequencer/TabImport.h"
@@ -763,6 +765,163 @@ void testFretboard() {
     CHECK(std::string(guitar::pitchClassName(9)) == "A");
 }
 
+// ── 코드 찾기: 조성 판별 · 다이어토닉 코드 · 마디별 추천 ──
+void testChordFinder() {
+    using namespace seq;
+    auto mk = [](uint8_t note, uint32_t start, uint32_t dur) {
+        return MelNote{note, start, dur};
+    };
+    const uint32_t Q = 480; // 4분음표 = 480틱
+
+    // [1] 조성 판별: C장조 음계(C D E F G A B, 다 같은 길이) → C장조
+    {
+        std::vector<MelNote> mel;
+        const int cmaj[] = {60, 62, 64, 65, 67, 69, 71};
+        for (int i = 0; i < 7; ++i) mel.push_back(mk((uint8_t)cmaj[i], (uint32_t)i * Q, Q));
+        const MusicKey k = detectKey(mel);
+        CHECK(k.root == 0 && !k.minor); // C장조
+        CHECK(keyName(k) == "C");
+    }
+    // 조성 판별: A단조 성격(근음 A·3도 C·5도 E를 길게) → A단조
+    {
+        std::vector<MelNote> mel = {mk(69, 0, Q * 2), mk(72, Q * 2, Q * 2),
+                                    mk(76, Q * 4, Q * 2), mk(69, Q * 6, Q * 2),
+                                    mk(71, Q * 8, Q / 2),  mk(74, Q * 8 + Q / 2, Q / 2)};
+        const MusicKey k = detectKey(mel);
+        CHECK(k.root == 9 && k.minor); // A단조
+        CHECK(keyName(k) == "Am");
+    }
+
+    // [2] 다이어토닉 코드: C장조 → C Dm Em F G Am Bdim
+    {
+        const auto ch = diatonicChords({0, false});
+        CHECK(chordName(ch[0]) == "C");
+        CHECK(chordName(ch[1]) == "Dm");
+        CHECK(chordName(ch[2]) == "Em");
+        CHECK(chordName(ch[3]) == "F");
+        CHECK(chordName(ch[4]) == "G");
+        CHECK(chordName(ch[5]) == "Am");
+        CHECK(chordName(ch[6]) == "Bdim");
+        // C 구성음 = {0,4,7}
+        CHECK(ch[0].pcs[0] == 0 && ch[0].pcs[1] == 4 && ch[0].pcs[2] == 7);
+    }
+    // 다이어토닉: A단조 → Am Bdim C Dm Em F G
+    {
+        const auto ch = diatonicChords({9, true});
+        CHECK(chordName(ch[0]) == "Am");
+        CHECK(chordName(ch[1]) == "Bdim");
+        CHECK(chordName(ch[2]) == "C");
+        CHECK(chordName(ch[3]) == "Dm");
+        CHECK(chordName(ch[4]) == "Em");
+    }
+
+    // [3] 마디별 추천: C장조, 4/4(한 마디 4Q=1920틱).
+    // 1마디 = C코드 음(C·E·G), 2마디 = G코드 음(G·B·D) → C, G
+    {
+        const uint32_t BAR = Q * 4;
+        std::vector<MelNote> mel = {
+            mk(60, 0, Q), mk(64, Q, Q), mk(67, Q * 2, Q), mk(72, Q * 3, Q),     // C
+            mk(67, BAR, Q), mk(71, BAR + Q, Q), mk(74, BAR + Q * 2, Q),          // G
+            mk(67, BAR + Q * 3, Q)};
+        ChordRecoOptions opt;
+        opt.ticksPerBar = BAR;
+        opt.smooth = false; // 스무딩 없이 원 판정 확인
+        const auto rec = recommendChords(mel, {0, false}, opt);
+        CHECK(rec.size() == 2);
+        if (rec.size() == 2) {
+            CHECK(chordName(rec[0].chord) == "C");
+            CHECK(chordName(rec[1].chord) == "G");
+        }
+    }
+    // 짧은 경과음 제외 옵션: 코드음(길게) + 코드밖 음(아주 짧게) → 코드음 코드
+    {
+        const uint32_t BAR = Q * 4;
+        std::vector<MelNote> mel = {mk(65, 0, Q * 3),        // F를 길게
+                                    mk(60, Q * 3, Q / 8)};   // C를 아주 짧게(경과음)
+        ChordRecoOptions opt;
+        opt.ticksPerBar = BAR;
+        opt.minNoteTicks = Q / 4; // 16분음표 미만 제외
+        const auto rec = recommendChords(mel, {0, false}, opt);
+        CHECK(rec.size() == 1);
+        if (!rec.empty()) CHECK(chordName(rec[0].chord) == "F");
+    }
+
+    // 빈 입력은 안전하게 C장조 + 코드 없음
+    {
+        const MusicKey k = detectKey({});
+        CHECK(k.root == 0 && !k.minor);
+        ChordRecoOptions opt;
+        CHECK(recommendChords({}, k, opt).empty());
+    }
+}
+
+// ── 드럼 패턴 자동 생성 ──
+void testDrumPattern() {
+    using namespace seq;
+    const uint32_t PPQN = 480;
+
+    auto count = [](const std::vector<DrumHit>& hits, uint8_t note) {
+        int c = 0;
+        for (const auto& h : hits) if (h.note == note) ++c;
+        return c;
+    };
+    auto hasAt = [](const std::vector<DrumHit>& hits, uint32_t tick, uint8_t note) {
+        for (const auto& h : hits)
+            if (h.tick == tick && h.note == note) return true;
+        return false;
+    };
+
+    // 4/4 기본: 1마디 → 킥 2(1·3박), 스네어 2(2·4박), 햇 8개, 크래시 1
+    {
+        const auto p = generateDrumPattern(kSig44, kStyleBasic, PPQN, 1);
+        CHECK(count(p, kDrumKick) == 2);
+        CHECK(count(p, kDrumSnare) == 2);
+        CHECK(count(p, kDrumHatClosed) == 8);
+        CHECK(count(p, kDrumCrash) == 1);
+        // 킥은 1박(0), 3박(2*PPQN); 스네어는 2박(PPQN), 4박(3*PPQN)
+        CHECK(hasAt(p, 0, kDrumKick));
+        CHECK(hasAt(p, 2 * PPQN, kDrumKick));
+        CHECK(hasAt(p, PPQN, kDrumSnare));
+        CHECK(hasAt(p, 3 * PPQN, kDrumSnare));
+    }
+    // 4/4 2마디: 마디마다 반복되고 startTick 오프셋이 붙는다
+    {
+        const uint32_t bar = 4 * PPQN;
+        const auto p = generateDrumPattern(kSig44, kStyleBasic, PPQN, 2, bar);
+        CHECK(count(p, kDrumSnare) == 4); // 2마디 × 2
+        CHECK(hasAt(p, bar + PPQN, kDrumSnare));       // 2마디째 2박
+        CHECK(hasAt(p, bar + 3 * PPQN, kDrumSnare));   // 2마디째 4박
+        // 크래시는 채우기 첫 마디에만 (2마디여도 1개)
+        CHECK(count(p, kDrumCrash) == 1);
+    }
+    // 3/4: 한 마디 6개 8분. 킥 1박, 스네어 2·3박
+    {
+        const auto p = generateDrumPattern(kSig34, kStyleBasic, PPQN, 1);
+        CHECK(count(p, kDrumKick) == 1);
+        CHECK(count(p, kDrumSnare) == 2);
+        CHECK(hasAt(p, 0, kDrumKick));
+        CHECK(hasAt(p, PPQN, kDrumSnare));     // 2박
+        CHECK(hasAt(p, 2 * PPQN, kDrumSnare)); // 3박
+    }
+    // 6/8: 겹박자, 8분 6개. 킥 첫 8분·네 번째 8분, 스네어 네 번째
+    {
+        const auto p = generateDrumPattern(kSig68, kStyleBasic, PPQN, 1);
+        CHECK(count(p, kDrumHatClosed) == 6);
+        CHECK(hasAt(p, 0, kDrumKick));
+        CHECK(hasAt(p, 3 * (PPQN / 2), kDrumKick));  // 4번째 8분
+        CHECK(hasAt(p, 3 * (PPQN / 2), kDrumSnare));
+    }
+    // 발라드는 크래시 없이 성글게 (햇은 있으나 킥 1개)
+    {
+        const auto p = generateDrumPattern(kSig44, kStyleBallad, PPQN, 1);
+        CHECK(count(p, kDrumCrash) == 0);
+        CHECK(count(p, kDrumKick) == 1);
+    }
+    // 빈/무효 입력은 빈 결과
+    CHECK(generateDrumPattern(kSig44, kStyleBasic, 0, 1).empty());
+    CHECK(generateDrumPattern(kSig44, kStyleBasic, PPQN, 0).empty());
+}
+
 } // namespace
 
 int main() {
@@ -787,6 +946,8 @@ int main() {
     testVlq();
     testSmfRoundTrip();
     testFretboard();
+    testChordFinder();
+    testDrumPattern();
 
     if (g_failures == 0) {
         std::cout << "[OK] sequencer tests passed\n";

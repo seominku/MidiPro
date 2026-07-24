@@ -47,6 +47,10 @@ public:
 
     // 선택 클래스를 인스턴스화하고 오디오 처리를 준비한다.
     bool instantiate(int classIndex, double sampleRate, int maxBlockSize, std::string& err);
+    // 오디오 스트림이 바뀌어(장치 변경·버퍼 크기 변경) 샘플레이트나 블록 크기가
+    // 달라졌을 때 플러그인을 다시 준비한다. 값이 그대로면 아무 일도 하지 않는다.
+    // 반드시 오디오가 멈춘 상태에서 부를 것. 음색(상태)은 유지된다.
+    bool reconfigure(double sampleRate, int maxBlockSize);
     void unload(); // 에디터 닫고 플러그인/모듈 해제
 
     bool isLoaded() const;      // 인스턴스화까지 완료됨

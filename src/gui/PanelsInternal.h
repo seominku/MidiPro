@@ -33,6 +33,13 @@ void levelMeterWidget(const char* id, AppState::MeterView* views, const float* r
                       float w, float h);
 // 가로 미니 레벨 미터 (트랙 목록의 좁은 행용)
 void miniMeterH(const char* id, AppState::MeterView& m, float raw, float w, float h);
+// 창별 배경 이미지: 각 창의 Begin() 직후에 부른다 (예약이 없으면 아무 일도 안 함).
+// 정의는 BackgroundImage.cpp — 패널마다 그 헤더를 넣지 않아도 되도록 여기서 노출.
+void drawPendingWindowBackground();
+// 트랙 FX 체인 박스 (트랙 뷰·기타 연습 창 공용). PanelsTrackView.cpp에 정의.
+// withInstrument=false면 악기/프리즈 없이 이펙트만 (연습 창의 기타 톤 체인).
+void drawTrackFxChain(AppState& state, int trackIndex, float boxW, float boxH,
+                      bool withInstrument);
 
 // ---- 트랜스포트/공용 동작 헬퍼 (Panels.cpp에 정의) ----
 // 노트 번호 → "C4" 같은 표기
@@ -96,6 +103,8 @@ void toggleTabTrack(AppState& state, int trackIndex);
 void addTrack(AppState& state);
 void addDrumTrack(AppState& state); // 채널 10 드럼 트랙 + 에디터 열기
 void addGuitarTrack(AppState& state); // 기타 트랙 + 타브 악보 창 열기
+// 연습 트랙(기타 연습 창 전용) 생성 + 선택. MIDI 트랙 목록에는 나타나지 않는다.
+void addPracticeTrack(AppState& state);
 // 드럼 노트에 WAV 샘플 배정 (빈 경로 = 내장 신스로 복귀). PanelsDrums.cpp에 정의.
 bool assignDrumSample(AppState& state, int note, const std::string& utf8Path);
 void deleteTrack(AppState& state, int index);

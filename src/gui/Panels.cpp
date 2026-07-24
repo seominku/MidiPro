@@ -767,6 +767,27 @@ void addGuitarTrack(AppState& state) {
     state.statusMessage = "기타 트랙 생성 — 노트는 피아노 롤에서, 타브는 이 창에서";
 }
 
+// 새 연습 트랙(기타 연습 창 전용)을 만들고 선택한다.
+// practice=true라서 트랙 뷰·믹서·피아노 롤에는 나타나지 않는다 — 곡 작업용
+// 트랙과 연습용 악보가 한 목록에 섞이지 않게 하려는 것.
+void addPracticeTrack(AppState& state) {
+    state.snapshot();
+    int n = 0;
+    for (const auto& t : state.song.tracks)
+        if (t.practice) ++n;
+    seq::Track t;
+    t.name = n == 0 ? "연습 기타" : ("연습 기타 " + std::to_string(n + 1));
+    t.channel = (uint8_t)(state.song.tracks.size() & 0x0F);
+    if ((t.channel & 0x0F) == 9) t.channel = 10; // 드럼 채널(10)은 피한다
+    t.isGuitar = true;
+    t.practice = true;
+    state.song.tracks.push_back(std::move(t));
+    state.practiceTrack = (int)state.song.tracks.size() - 1;
+    addTrackEq(state, state.song.tracks.back());
+    state.showTab = true;
+    state.statusMessage = "연습 트랙 생성 — 타브를 가져와 연습하세요";
+}
+
 // 새 드럼 트랙(채널 10)을 만들고 선택 + 드럼 트랙 에디터를 연다.
 void addDrumTrack(AppState& state) {
     state.snapshot();
@@ -853,7 +874,9 @@ bool startAudioRecording(AppState& state, int trackIndex) {
     }
 
     auto& track = state.song.tracks[trackIndex];
-    state.selectedTrack = trackIndex;
+    // 연습 트랙은 MIDI 쪽 선택을 건드리지 않는다 (트랙 뷰에 보이지도 않는 트랙이
+    // 선택되면 피아노 롤 등이 엉뚱한 트랙을 편집하게 된다).
+    if (!track.practice) state.selectedTrack = trackIndex;
 
     // ASIO가 캡처 중이 아니면 이 트랙 설정으로 연다.
     bool ready = in->asioActive();
@@ -1648,6 +1671,7 @@ void drawExportDialog(AppState& state) {
     const ImGuiViewport* vp = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(vp->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
     ImGui::Begin("내보내기", &state.showExportDialog, ImGuiWindowFlags_AlwaysAutoResize);
+    drawPendingWindowBackground(); // 창별 배경 이미지 (예약이 있으면)
 
     // 저장 위치(폴더)와 파일 이름을 따로 지정한다
     ImGui::TextUnformatted("저장 위치 (폴더)");
@@ -1719,7 +1743,11 @@ void drawExportDialog(AppState& state) {
         const uint32_t totalTicks =
             std::max({contentEnd, state.exportEndTick, tpb * 4}) + tpb;
         const int totalBars = (int)((totalTicks + tpb - 1) / tpb);
-        const int nTracks = std::max(1, (int)state.song.tracks.size());
+        // 연습 트랙은 곡의 일부가 아니다 — 내보내기 미리보기에서 제외
+        std::vector<int> exIdx;
+        for (int i = 0; i < (int)state.song.tracks.size(); ++i)
+            if (!state.song.tracks[(std::size_t)i].practice) exIdx.push_back(i);
+        const int nTracks = std::max(1, (int)exIdx.size());
         const float w = 430.0f;
         const float rowH = std::clamp(44.0f / (float)nTracks, 5.0f, 12.0f);
         const float h = std::max(30.0f, rowH * (float)nTracks + 6.0f);
@@ -1780,10 +1808,11 @@ void drawExportDialog(AppState& state) {
             IM_COL32(120, 220, 140, 255), IM_COL32(230, 120, 200, 255),
             IM_COL32(250, 220, 100, 255), IM_COL32(140, 130, 250, 255),
             IM_COL32(100, 220, 220, 255), IM_COL32(250, 120, 120, 255)};
-        for (int ti = 0; ti < (int)state.song.tracks.size(); ++ti) {
+        for (int row = 0; row < (int)exIdx.size(); ++row) {
+            const int ti = exIdx[(std::size_t)row];
             const auto& tr = state.song.tracks[(std::size_t)ti];
             const ImU32 col = kTrackCols[ti % 8];
-            const float ry = p.y + 3.0f + rowH * (float)ti;
+            const float ry = p.y + 3.0f + rowH * (float)row;
             const float rcy = ry + rowH * 0.5f;
             // 오디오 클립: 반투명 채움 블록
             for (const auto& cp : tr.clips) {
@@ -1956,6 +1985,7 @@ void drawPerf(AppState& state) {
     if (!state.showPerf) return;
     ImGui::SetNextWindowSize(ImVec2(280, 200), ImGuiCond_FirstUseEver);
     ImGui::Begin("성능", &state.showPerf);
+    drawPendingWindowBackground(); // 창별 배경 이미지 (예약이 있으면)
     const ImGuiIO& io = ImGui::GetIO();
     ImGui::Text("화면: %.0f FPS (%.1f ms)", io.Framerate,
                 io.Framerate > 0.0f ? 1000.0f / io.Framerate : 0.0f);
@@ -2351,7 +2381,7 @@ void drawMenuBar(AppState& state, bool& openRequested, bool& saveRequested) {
             ImGui::MenuItem("피아노 롤", nullptr, &state.showPianoRoll);
             ImGui::MenuItem("드럼 트랙", nullptr, &state.showDrums);
             ImGui::MenuItem("어레인지", nullptr, &state.showArrange);
-            ImGui::MenuItem("타브 악보", nullptr, &state.showTab);
+            ImGui::MenuItem("기타 연습", nullptr, &state.showTab);
             ImGui::MenuItem("신디사이저", nullptr, &state.showSynth);
             ImGui::MenuItem("VST3 플러그인", nullptr, &state.showVst);
             ImGui::MenuItem("기타 도우미", nullptr, &state.showGuitar);
@@ -2423,7 +2453,7 @@ void drawMenuBar(AppState& state, bool& openRequested, bool& saveRequested) {
         ImGui::SetNextWindowSize(ImVec2(360, 0), ImGuiCond_FirstUseEver);
         if (ImGui::Begin("MidiPro 정보", &state.showAbout,
                          ImGuiWindowFlags_AlwaysAutoResize)) {
-            ImGui::TextUnformatted("MidiPro 1.1");
+            ImGui::TextUnformatted("MidiPro 1.2");
             ImGui::TextDisabled("MIDI 시퀀서 + 오디오 녹음 + VST3 호스트");
             ImGui::Text("빌드: %s", __DATE__);
             ImGui::Separator();
@@ -2510,6 +2540,8 @@ static void drawDevicesBody(AppState& state) {
         }
         if (ports.empty())
             ImGui::TextDisabled("입력 장치 없음 (loopMIDI 등 가상 포트 사용 가능)");
+        else
+            ImGui::TextDisabled("※ 열어 둔 장치는 기억했다가 다음 실행 때 자동으로 엽니다.");
     }
 
     ImGui::Separator();
@@ -2520,6 +2552,7 @@ static void drawDevicesBody(AppState& state) {
 void drawDevices(AppState& state) {
     if (!state.showDevices) return;
     ImGui::Begin("MIDI 장치", &state.showDevices);
+    drawPendingWindowBackground(); // 창별 배경 이미지 (예약이 있으면)
     drawDevicesBody(state);
     ImGui::End();
 }
@@ -2724,6 +2757,7 @@ void drawSynth(AppState& state) {
     ImGui::SetNextWindowPos(vp->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
     ImGui::SetNextWindowSize(ImVec2(430, 640), ImGuiCond_FirstUseEver);
     ImGui::Begin("신디사이저", &state.showSynth);
+    drawPendingWindowBackground(); // 창별 배경 이미지 (예약이 있으면)
     drawSynthBody(state);
     ImGui::End();
 }
@@ -2788,6 +2822,123 @@ static void drawAsioBody(AppState& state) {
     }
 }
 
+// 배경 이미지 '직접 지정' 모드의 크기·위치 조절 (전체 배경·창 배경 공용).
+// 위치는 0=왼쪽/위, 0.5=가운데, 1=오른쪽/아래 (이미지가 크면 그만큼 밀린다).
+static bool drawBgPlacement(float& scale, float& posX, float& posY, const char* idSuffix) {
+    bool changed = false;
+    char id[32];
+    ImGui::Indent(12.0f);
+    std::snprintf(id, sizeof(id), "크기##bgpl%s", idSuffix);
+    ImGui::SetNextItemWidth(200);
+    float pct = scale * 100.0f;
+    if (ImGui::DragFloat(id, &pct, 1.0f, 2.0f, 2000.0f, "%.0f%%")) {
+        scale = std::clamp(pct / 100.0f, 0.02f, 20.0f);
+        changed = true;
+    }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("원본 크기 대비 배율입니다 (100%% = 원본 그대로).\n"
+                          "드래그로 조절, 더블클릭으로 직접 입력.");
+    std::snprintf(id, sizeof(id), "가로 위치##bgpl%s", idSuffix);
+    ImGui::SetNextItemWidth(200);
+    changed |= ImGui::SliderFloat(id, &posX, 0.0f, 1.0f, "%.2f");
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("0=왼쪽 · 0.5=가운데 · 1=오른쪽");
+    std::snprintf(id, sizeof(id), "세로 위치##bgpl%s", idSuffix);
+    ImGui::SetNextItemWidth(200);
+    changed |= ImGui::SliderFloat(id, &posY, 0.0f, 1.0f, "%.2f");
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("0=위 · 0.5=가운데 · 1=아래");
+    std::snprintf(id, sizeof(id), "가운데·원본 크기로##bgpl%s", idSuffix);
+    if (ImGui::SmallButton(id)) {
+        scale = 1.0f;
+        posX = posY = 0.5f;
+        changed = true;
+    }
+    ImGui::Unindent(12.0f);
+    return changed;
+}
+
+// 배경 이미지 레이어 목록 편집 (전체 배경·창별 배경 공용).
+// target: -1 = 전체 배경, 0.. = 그 창. 바뀌면 true.
+static bool drawBgLayers(AppState& state, std::vector<BgLayer>& layers, int target) {
+    bool changed = false;
+    const char* sfx = target < 0 ? "g" : "w";
+    char id[64];
+
+    std::snprintf(id, sizeof(id), "이미지 추가...##bgl%s", sfx);
+    if (ImGui::Button(id)) {
+        state.bgImageTargetWindow = target;
+        state.bgImageOpenRequested = true;
+    }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("여러 장을 넣을 수 있습니다 — 목록 위쪽이 아래에 깔리고\n"
+                          "아래쪽이 그 위에 겹쳐집니다 (예: 벽지 + 구석 로고).");
+    if (layers.empty()) {
+        ImGui::SameLine();
+        ImGui::TextDisabled(target < 0 ? "창 전체 뒤에 깔립니다" : "이 창 안쪽에만 깔립니다");
+        return changed;
+    }
+
+    // 목록: 아래→위 순서. 선택한 레이어만 아래에서 자세히 조절한다.
+    int sel = std::clamp(state.bgLayerSel, 0, (int)layers.size() - 1);
+    int moveFrom = -1, moveTo = -1, removeAt = -1;
+    for (int i = 0; i < (int)layers.size(); ++i) {
+        ImGui::PushID(i);
+        bool vis = layers[(std::size_t)i].visible;
+        if (ImGui::Checkbox("##vis", &vis)) {
+            layers[(std::size_t)i].visible = vis;
+            changed = true;
+        }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("잠시 끄기/켜기");
+        ImGui::SameLine();
+        std::string nm = layers[(std::size_t)i].image;
+        const std::size_t sl = nm.find_last_of("/\\");
+        if (sl != std::string::npos) nm = nm.substr(sl + 1);
+        char lbl[160];
+        std::snprintf(lbl, sizeof(lbl), "%d. %s", i + 1, nm.c_str());
+        if (ImGui::Selectable(lbl, i == sel, 0, ImVec2(240, 0))) sel = i;
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s", layers[(std::size_t)i].image.c_str());
+        ImGui::SameLine();
+        ImGui::BeginDisabled(i == 0);
+        if (ImGui::SmallButton("▲")) { moveFrom = i; moveTo = i - 1; }
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        ImGui::BeginDisabled(i + 1 >= (int)layers.size());
+        if (ImGui::SmallButton("▼")) { moveFrom = i; moveTo = i + 1; }
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        if (ImGui::SmallButton("삭제")) removeAt = i;
+        ImGui::PopID();
+    }
+    if (moveFrom >= 0) { // 겹치는 순서 바꾸기
+        std::swap(layers[(std::size_t)moveFrom], layers[(std::size_t)moveTo]);
+        sel = moveTo;
+        state.bgLayersDirty = target < 0 ? 0 : target + 1; // 텍스처 순서도 맞춘다
+        changed = true;
+    }
+    if (removeAt >= 0) {
+        layers.erase(layers.begin() + removeAt);
+        if (sel >= (int)layers.size()) sel = (int)layers.size() - 1;
+        state.bgLayersDirty = target < 0 ? 0 : target + 1;
+        changed = true;
+    }
+    state.bgLayerSel = sel < 0 ? 0 : sel;
+    if (layers.empty()) return changed;
+
+    // 선택한 레이어의 설정
+    BgLayer& L = layers[(std::size_t)state.bgLayerSel];
+    ImGui::Separator();
+    ImGui::TextDisabled("%d번 이미지 설정", state.bgLayerSel + 1);
+    std::snprintf(id, sizeof(id), "진하기##bgl%s", sfx);
+    ImGui::SetNextItemWidth(200);
+    changed |= ImGui::SliderFloat(id, &L.opacity, 0.0f, 1.0f, "%.2f");
+    std::snprintf(id, sizeof(id), "표시 방식##bgl%s", sfx);
+    ImGui::SetNextItemWidth(160);
+    const char* kFits[] = {"채우기 (잘림)", "맞추기 (여백)", "타일", "직접 지정"};
+    changed |= ImGui::Combo(id, &L.fit, kFits, 4);
+    if (L.fit == 3) changed |= drawBgPlacement(L.scale, L.posX, L.posY, sfx);
+    return changed;
+}
+
 // ---------------------------------------------------------
 // 테마: 프리셋 + 간단 파라미터(강조색/배경/글자/둥글기) + 고급 편집기
 // ---------------------------------------------------------
@@ -2795,26 +2946,316 @@ void drawThemeBody(AppState& state) {
     ThemeParams& t = state.theme;
     bool changed = false;
 
-    ImGui::TextDisabled("프리셋");
-    if (ImGui::Button("다크 (기본)")) { t = themeDark(); changed = true; }
+    // 처음 쓰는 사람이 겁먹지 않도록 단계적으로 보여준다.
+    // 0=기본(프리셋만) · 1=자세히(색 조절) · 2=고급(창별·내 테마·개별 색)
+    const int lv = std::clamp(state.themeUiLevel, 0, 2);
+
+    ImGui::TextDisabled("테마 고르기 — 누르면 바로 적용됩니다");
+    {
+        // 프리셋 버튼에 그 테마의 실제 색을 칠해 준다 (이름만 보고 상상 안 하도록).
+        // 줄바꿈은 창 폭에 맞춰 자동 — 프리셋이 늘어도 UI를 안 고쳐도 된다.
+        const ThemePreset* ps = themePresets();
+        const int n = themePresetCount();
+        const float avail = ImGui::GetContentRegionAvail().x;
+        const float btnW = 112.0f;
+        float used = 0.0f;
+        for (int i = 0; i < n; ++i) {
+            const ThemeParams pp = ps[i].make();
+            if (i > 0 && used + btnW < avail) ImGui::SameLine();
+            else used = 0.0f;
+            // 버튼 = 그 테마의 배경색, 글자 = 그 테마의 글자색 (미리보기 역할)
+            const ImVec4 bgc(std::clamp(pp.bg + 0.06f, 0.0f, 1.0f),
+                             std::clamp(pp.bg + 0.06f, 0.0f, 1.0f),
+                             std::clamp(pp.bg + 0.08f, 0.0f, 1.0f), 1.0f);
+            const ImVec4 acc(pp.accent[0], pp.accent[1], pp.accent[2], 1.0f);
+            ImGui::PushStyleColor(ImGuiCol_Button, bgc);
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, acc);
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, acc);
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(pp.text, pp.text, pp.text, 1.0f));
+            ImGui::PushID(i);
+            const bool hit = ImGui::Button(ps[i].name, ImVec2(btnW, 0));
+            // 강조색 띠를 버튼 아래쪽에 그려 색을 한눈에 알 수 있게
+            {
+                const ImVec2 mn = ImGui::GetItemRectMin(), mx = ImGui::GetItemRectMax();
+                ImGui::GetWindowDrawList()->AddRectFilled(
+                    ImVec2(mn.x + 3.0f, mx.y - 5.0f), ImVec2(mx.x - 3.0f, mx.y - 2.0f),
+                    ImGui::GetColorU32(acc), 1.5f);
+            }
+            ImGui::PopID();
+            ImGui::PopStyleColor(4);
+            if (hit) {
+                // 배경 이미지·위젯 스킨은 그대로 두고 색만 바꾼다
+                auto keepLayers = std::move(t.bgLayers);
+                UiSkin keepSkins[kSkinSlotCount];
+                for (int k = 0; k < kSkinSlotCount; ++k) keepSkins[k] = t.skins[k];
+                t = ps[i].make();
+                t.bgLayers = std::move(keepLayers);
+                for (int k = 0; k < kSkinSlotCount; ++k) t.skins[k] = keepSkins[k];
+                changed = true;
+            }
+            used += btnW + ImGui::GetStyle().ItemSpacing.x;
+        }
+    }
+
+    // 기본 단계: 밝기 하나만 + 안전장치
+    ImGui::Spacing();
+    ImGui::SetNextItemWidth(220);
+    changed |= ImGui::SliderFloat("밝기", &t.bg, 0.0f, 1.0f, "%.2f");
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("왼쪽=어둡게, 오른쪽=밝게");
     ImGui::SameLine();
-    if (ImGui::Button("라이트")) { t = themeLight(); changed = true; }
-    ImGui::SameLine();
-    if (ImGui::Button("미드나잇")) { t = themeMidnight(); changed = true; }
-    ImGui::SameLine();
-    if (ImGui::Button("바이올렛")) { t = themeViolet(); changed = true; }
+    if (ImGui::Button("기본으로 되돌리기")) state.themeResetRequested = true;
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("색·창별 설정·배경 이미지를 모두 처음 상태로 되돌립니다.\n"
+                          "저장해 둔 '내 테마'는 지워지지 않습니다.");
+
+    // 단계 전환
+    ImGui::Spacing();
+    if (lv == 0) {
+        if (ImGui::SmallButton("더 자세히 ▾")) state.themeUiLevel = 1;
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("강조색·글자·모서리·배경 이미지를 직접 조절합니다");
+    } else {
+        if (ImGui::SmallButton("간단히 ▴")) state.themeUiLevel = 0;
+        if (lv == 1) {
+            ImGui::SameLine();
+            if (ImGui::SmallButton("고급 설정 ▾")) state.themeUiLevel = 2;
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("창별로 따로 꾸미기 · 내 테마 저장/주고받기 · 개별 색 편집");
+        }
+    }
+
+    if (lv == 0) { // 기본 단계는 여기서 끝 (초보가 볼 건 이게 전부)
+        if (changed) {
+            applyThemeParams(t);
+            state.themeDirty = true;
+        }
+        return;
+    }
 
     ImGui::Separator();
     ImGui::TextDisabled("직접 꾸미기 (바꾸면 즉시 적용·자동 저장)");
-    changed |= ImGui::ColorEdit3("강조색", t.accent);
-    changed |= ImGui::SliderFloat("배경 밝기", &t.bg, 0.0f, 1.0f, "%.2f");
-    changed |= ImGui::SliderFloat("글자 밝기", &t.text, 0.0f, 1.0f, "%.2f");
-    changed |= ImGui::SliderFloat("모서리 둥글기", &t.rounding, 0.0f, 12.0f, "%.0f");
+    // ---- 적용 대상 (고급 단계에서만): 전체 또는 특정 창 ----
+    if (lv >= 2) {
+        ImGui::SetNextItemWidth(190);
+        const char* cur = state.themeTargetWindow < 0
+                              ? "전체 (기본)"
+                              : themeWindowName(state.themeTargetWindow);
+        if (ImGui::BeginCombo("적용 대상", cur)) {
+            if (ImGui::Selectable("전체 (기본)", state.themeTargetWindow < 0))
+                state.themeTargetWindow = -1;
+            ImGui::Separator();
+            for (int i = 0; i < kThemeWindowCount; ++i) {
+                char lbl[64];
+                std::snprintf(lbl, sizeof(lbl), "%s%s", themeWindowName(i),
+                              state.windowStyles[i].enabled ? "  *" : "");
+                if (ImGui::Selectable(lbl, state.themeTargetWindow == i))
+                    state.themeTargetWindow = i;
+            }
+            ImGui::EndCombo();
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("특정 창을 고르면 그 창만 다르게 꾸밀 수 있습니다.\n"
+                              "* 표시 = 이미 따로 설정된 창");
+    } else {
+        state.themeTargetWindow = -1; // 자세히 단계에서는 항상 전체
+    }
+
+    if (state.themeTargetWindow < 0) {
+        // 전체 테마 (밝기는 위 기본 단계에 이미 있으므로 여기선 뺀다)
+        changed |= ImGui::ColorEdit3("강조색", t.accent);
+        changed |= ImGui::SliderFloat("글자 밝기", &t.text, 0.0f, 1.0f, "%.2f");
+        changed |= ImGui::SliderFloat("모서리 둥글기", &t.rounding, 0.0f, 12.0f, "%.0f");
+        changed |= ImGui::SliderFloat("패널 불투명도", &t.panelAlpha, 0.15f, 1.0f, "%.2f");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("창(패널) 배경의 불투명도입니다.\n"
+                              "낮추면 뒤에 깔아둔 배경 이미지가 비쳐 보입니다.");
+    } else {
+        // 창 하나만: 체크한 항목만 덮어쓰고 나머지는 전체 테마를 따라간다
+        WindowStyleOverride& ov = state.windowStyles[state.themeTargetWindow];
+        if (ImGui::Checkbox("이 창만 다르게", &ov.enabled)) {
+            // 처음 켤 때 현재 전체 값에서 출발하면 조절이 자연스럽다
+            if (ov.enabled && !ov.anyField()) {
+                ov.accent[0] = t.accent[0];
+                ov.accent[1] = t.accent[1];
+                ov.accent[2] = t.accent[2];
+                ov.bg = t.bg;
+                ov.text = t.text;
+                ov.rounding = t.rounding;
+                ov.panelAlpha = t.panelAlpha;
+            }
+            changed = true;
+        }
+        ImGui::TextDisabled("체크한 항목만 이 창에 적용되고, 나머지는 전체 설정을 따라갑니다.");
+        ImGui::BeginDisabled(!ov.enabled);
+        changed |= ImGui::Checkbox("##ua", &ov.useAccent);
+        ImGui::SameLine();
+        ImGui::BeginDisabled(!ov.useAccent);
+        changed |= ImGui::ColorEdit3("강조색##w", ov.accent);
+        ImGui::EndDisabled();
+
+        changed |= ImGui::Checkbox("##ub", &ov.useBg);
+        ImGui::SameLine();
+        ImGui::BeginDisabled(!ov.useBg);
+        changed |= ImGui::SliderFloat("배경 밝기##w", &ov.bg, 0.0f, 1.0f, "%.2f");
+        ImGui::EndDisabled();
+
+        changed |= ImGui::Checkbox("##ut", &ov.useText);
+        ImGui::SameLine();
+        ImGui::BeginDisabled(!ov.useText);
+        changed |= ImGui::SliderFloat("글자 밝기##w", &ov.text, 0.0f, 1.0f, "%.2f");
+        ImGui::EndDisabled();
+
+        changed |= ImGui::Checkbox("##ur", &ov.useRounding);
+        ImGui::SameLine();
+        ImGui::BeginDisabled(!ov.useRounding);
+        changed |= ImGui::SliderFloat("모서리 둥글기##w", &ov.rounding, 0.0f, 12.0f, "%.0f");
+        ImGui::EndDisabled();
+
+        changed |= ImGui::Checkbox("##up", &ov.usePanelAlpha);
+        ImGui::SameLine();
+        ImGui::BeginDisabled(!ov.usePanelAlpha);
+        changed |= ImGui::SliderFloat("패널 불투명도##w", &ov.panelAlpha, 0.15f, 1.0f, "%.2f");
+        ImGui::EndDisabled();
+        ImGui::EndDisabled();
+
+        // 이 창만의 배경 이미지들
+        ImGui::Spacing();
+        ImGui::TextDisabled("이 창의 배경 이미지 (여러 장 가능)");
+        changed |= drawBgLayers(state, ov.bgLayers, state.themeTargetWindow);
+        if (!ov.bgLayers.empty())
+            ImGui::TextDisabled("※ 이 창의 패널 불투명도를 낮춰야 잘 보입니다.");
+
+        if (ImGui::Button("전체 설정 따라가기로 되돌리기")) {
+            ov = WindowStyleOverride{}; // 배경 레이어도 함께 비워진다
+            state.bgLayersDirty = state.themeTargetWindow + 1; // 텍스처도 정리
+            changed = true;
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("이 창의 개별 설정을 지우고 전체 테마를 그대로 씁니다.");
+        ImGui::TextDisabled("※ 창별 설정을 켜면 그 창은 위 항목으로 팔레트를 새로 만듭니다\n"
+                            "   (아래 고급 편집기의 개별 색은 전체 창에만 적용됩니다).");
+    }
+
+    // ---- 배경 이미지/GIF ----
+    ImGui::Separator();
+    ImGui::TextDisabled("배경 이미지 (PNG · JPG · BMP · 움직이는 GIF) — 여러 장 가능");
+    if (state.bgImageInfo[0] && !t.bgLayers.empty()) {
+        ImGui::SameLine();
+        ImGui::TextDisabled("· %s", state.bgImageInfo);
+    }
+    changed |= drawBgLayers(state, t.bgLayers, -1);
+    if (!t.bgLayers.empty() && t.panelAlpha > 0.97f)
+        ImGui::TextDisabled("※ 패널 불투명도를 낮춰야 배경이 잘 보입니다.");
+
+    // ---- 위젯 스킨: 버튼·탭·제목 표시줄 (창별이 아니라 모든 창 공통) ----
+    ImGui::Separator();
+    ImGui::TextDisabled("버튼 · 탭 · 제목 표시줄 이미지 (모든 창 공통)");
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("창마다 따로가 아니라 앱 전체에 한 벌만 적용됩니다.\n"
+                          "움직이는 GIF는 첫 장만 쓰입니다.");
+    for (int i = 0; i < kSkinSlotCount; ++i) {
+        UiSkin& sk = t.skins[i];
+        ImGui::PushID(1000 + i);
+        ImGui::AlignTextToFramePadding();
+        ImGui::Text("%s", uiSkinSlotName(i));
+        ImGui::SameLine(110);
+        if (sk.image.empty()) {
+            if (ImGui::Button("이미지 넣기...")) {
+                state.skinImageSlot = i;
+                state.skinImageOpenRequested = true;
+            }
+        } else {
+            std::string nm = sk.image;
+            const std::size_t sl = nm.find_last_of("/\\");
+            if (sl != std::string::npos) nm = nm.substr(sl + 1);
+            ImGui::TextColored(ImVec4(0.6f, 0.85f, 1.0f, 1.0f), "%s", nm.c_str());
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", sk.image.c_str());
+            ImGui::SameLine();
+            if (ImGui::SmallButton("바꾸기")) {
+                state.skinImageSlot = i;
+                state.skinImageOpenRequested = true;
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("빼기")) {
+                sk.image.clear();
+                changed = true;
+            }
+            ImGui::SetNextItemWidth(160);
+            if (ImGui::SliderFloat("진하기", &sk.opacity, 0.1f, 1.0f, "%.2f")) changed = true;
+            // 붙이는 범위 오프셋 (픽셀). 늘리면 넘쳐서 잘리고, 줄이면 안쪽으로 당겨진다.
+            const float ow = 66.0f;
+            ImGui::SetNextItemWidth(ow);
+            if (ImGui::DragFloat("##ofsL", &sk.ofsL, 0.5f, -64.0f, 64.0f, "왼 %.0f"))
+                changed = true;
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(ow);
+            if (ImGui::DragFloat("##ofsR", &sk.ofsR, 0.5f, -64.0f, 64.0f, "오 %.0f"))
+                changed = true;
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(ow);
+            if (ImGui::DragFloat("##ofsT", &sk.ofsT, 0.5f, -64.0f, 64.0f, "위 %.0f"))
+                changed = true;
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(ow);
+            if (ImGui::DragFloat("##ofsB", &sk.ofsB, 0.5f, -64.0f, 64.0f, "아래 %.0f"))
+                changed = true;
+            ImGui::SameLine();
+            if (ImGui::SmallButton("0으로")) {
+                sk.ofsL = sk.ofsR = sk.ofsT = sk.ofsB = 0.0f;
+                changed = true;
+            }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("네 방향 오프셋을 0으로 되돌립니다.");
+        }
+        ImGui::PopID();
+    }
+    ImGui::TextDisabled("※ 마우스를 올리거나 누른 상태는 같은 이미지를 밝기만 달리해 보여줍니다.\n"
+                        "   왼/오/위/아래는 이미지를 붙일 범위(px) — 키우면 그 방향으로 넘쳐\n"
+                        "   잘려 보이고, 줄이면 안쪽으로 당겨집니다.");
 
     if (changed) {
         applyThemeParams(t);
         state.themeDirty = true;
     }
+
+    if (lv < 2) return; // 자세히 단계는 여기까지 (적용은 바로 위에서 했다)
+
+    // ---- 내 테마: 전체 + 창별 설정을 통째로 이름 붙여 저장 ----
+    ImGui::Separator();
+    ImGui::TextDisabled("내 테마 (지금 설정을 통째로 저장 — 창별 설정·배경까지 포함)");
+    ImGui::SetNextItemWidth(180);
+    ImGui::InputTextWithHint("##themename", "이름 (예: 야간 작업용)", state.themeSaveName,
+                             sizeof(state.themeSaveName));
+    ImGui::SameLine();
+    ImGui::BeginDisabled(state.themeSaveName[0] == '\0');
+    if (ImGui::Button("저장##theme")) state.themeSaveRequested = true;
+    ImGui::EndDisabled();
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("같은 이름이 있으면 덮어씁니다.");
+
+    if (state.themeFiles.empty()) {
+        ImGui::TextDisabled("저장된 테마가 없습니다.");
+    } else {
+        for (const auto& name : state.themeFiles) {
+            ImGui::PushID(name.c_str());
+            if (ImGui::SmallButton("불러오기")) state.themeLoadRequested = name;
+            ImGui::SameLine();
+            if (ImGui::SmallButton("내보내기")) state.themeExportRequested = name;
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("배경 이미지까지 담아 한 파일로 저장합니다.\n"
+                                  "그 파일을 남에게 보내면 그대로 쓸 수 있습니다.");
+            ImGui::SameLine();
+            if (ImGui::SmallButton("삭제")) state.themeDeleteRequested = name;
+            ImGui::SameLine();
+            ImGui::TextUnformatted(name.c_str());
+            ImGui::PopID();
+        }
+    }
+    if (ImGui::Button("테마 파일 가져오기...")) state.themeImportRequested = true;
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("남이 보내준 .mptheme 파일을 불러옵니다 (배경 이미지 포함).\n"
+                          "파일을 창에 끌어다 놓아도 됩니다.");
 
     ImGui::Separator();
     ImGui::TextDisabled("세부 조정이 필요하면 (색상 하나하나 개별 수정)");
@@ -2877,6 +3318,7 @@ void drawPreferences(AppState& state) {
     ImGui::SetNextWindowPos(vp->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
     ImGui::SetNextWindowSize(ImVec2(470, 700), ImGuiCond_FirstUseEver);
     ImGui::Begin("개인설정", &state.showPreferences);
+    drawPendingWindowBackground(); // 창별 배경 이미지 (예약이 있으면)
     if (ImGui::BeginTabBar("prefs_tabs")) {
         if (ImGui::BeginTabItem("ASIO")) {
             drawAsioBody(state);
@@ -2909,6 +3351,7 @@ void drawPreferences(AppState& state) {
 void drawVst(AppState& state) {
     if (!state.showVst) return;
     ImGui::Begin("VST3 플러그인", &state.showVst);
+    drawPendingWindowBackground(); // 창별 배경 이미지 (예약이 있으면)
 
     if (state.vst == nullptr) {
         ImGui::TextDisabled("VST 호스트를 사용할 수 없습니다.");
@@ -2931,6 +3374,18 @@ void drawVst(AppState& state) {
     }
     ImGui::SameLine();
     ImGui::Text("%d개 발견", (int)state.vstScanned.size());
+    ImGui::SameLine();
+    if (ImGui::Button("다시 조사")) {
+        // 악기/이펙트 판정은 플러그인을 실제로 열어 봐야 해서 느리다 —
+        // 그래서 결과를 기억해 둔다. 이 버튼은 그 기억을 버린다.
+        state.vst->clearPluginCache();
+        state.vstInstrumentsFiltered = false;
+        state.vstEffectsFiltered = false;
+        state.statusMessage = "플러그인 조사 결과를 지웠습니다 (다음에 다시 열어 봅니다)";
+    }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("악기/이펙트 구분이 잘못됐을 때만 누르세요.\n"
+                          "다음에 목록을 열 때 플러그인을 다시 열어 보므로 느려집니다.");
     if (state.vstScanned.empty())
         ImGui::TextDisabled("표준 VST3 폴더에서 플러그인을 찾지 못했습니다.");
 
@@ -2993,10 +3448,12 @@ void drawVst(AppState& state) {
             if (ImGui::BeginCombo("출력 트랙##instbus", preview)) {
                 if (ImGui::Selectable("마스터 직행", state.vstInstrumentTrack < 0))
                     state.vstInstrumentTrack = -1;
-                for (int ti = 0; ti < (int)state.song.tracks.size(); ++ti)
+                for (int ti = 0; ti < (int)state.song.tracks.size(); ++ti) {
+                    if (state.song.tracks[(std::size_t)ti].practice) continue;
                     if (ImGui::Selectable(state.song.tracks[(std::size_t)ti].name.c_str(),
                                           ti == state.vstInstrumentTrack))
                         state.vstInstrumentTrack = ti;
+                }
                 ImGui::EndCombo();
             }
             if (state.vstInstrumentTrack >= 0)
@@ -3066,6 +3523,7 @@ void drawVst(AppState& state) {
 void drawGuitarHelper(AppState& state) {
     if (!state.showGuitar) return;
     ImGui::Begin("기타 도우미", &state.showGuitar);
+    drawPendingWindowBackground(); // 창별 배경 이미지 (예약이 있으면)
 
     // ---- 튜닝 기준음 ----
     ImGui::SeparatorText("표준 튜닝 (누르면 재생)");
@@ -3177,6 +3635,7 @@ void drawGuitarHelper(AppState& state) {
 void drawMonitor(AppState& state) {
     if (!state.showMonitor) return;
     ImGui::Begin("입력 모니터", &state.showMonitor);
+    drawPendingWindowBackground(); // 창별 배경 이미지 (예약이 있으면)
 
     ImGui::Checkbox("모니터링", &state.monitorEnabled);
     ImGui::SameLine();

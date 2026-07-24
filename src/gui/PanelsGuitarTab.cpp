@@ -11,6 +11,7 @@
 #include "gui/Panels.h"
 #include "gui/PanelsInternal.h"
 
+#include "audio/AudioClip.h"
 #include "audio/PitchDetect.h"
 #include "pdf/PdfTab.h"
 #include "sequencer/TabImport.h"
@@ -33,6 +34,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <fstream>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -42,20 +44,47 @@ namespace midipro::gui {
 
 namespace {
 
-// PDF 열기 대화상자. 취소하면 빈 문자열.
-std::string openPdfDialog() {
+// 파일 열기 대화상자. 취소하면 빈 문자열. (한글 경로 지원 — 와이드 API)
+std::string openFileDialogW(const wchar_t* filter, const wchar_t* defExt) {
     wchar_t path[MAX_PATH] = L"";
     OPENFILENAMEW ofn = {};
     ofn.lStructSize = sizeof(ofn);
-    ofn.lpstrFilter = L"PDF 악보 (*.pdf)\0*.pdf\0모든 파일\0*.*\0";
+    ofn.lpstrFilter = filter;
     ofn.lpstrFile = path;
     ofn.nMaxFile = MAX_PATH;
-    ofn.lpstrDefExt = L"pdf";
+    ofn.lpstrDefExt = defExt;
     ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
     if (!GetOpenFileNameW(&ofn)) return {};
     char utf8[MAX_PATH * 4] = "";
     WideCharToMultiByte(CP_UTF8, 0, path, -1, utf8, sizeof(utf8), nullptr, nullptr);
     return std::string(utf8);
+}
+
+std::string openPdfDialog() {
+    return openFileDialogW(L"PDF 악보 (*.pdf)\0*.pdf\0모든 파일\0*.*\0", L"pdf");
+}
+
+// 연습 반주 음원 열기
+std::string openAudioDialog() {
+    return openFileDialogW(L"오디오 (*.mp3;*.wav;*.flac)\0*.mp3;*.wav;*.flac\0"
+                           L"모든 파일\0*.*\0",
+                           L"mp3");
+}
+
+// UTF-8 경로의 파일을 바이트로 읽는다 (한글 경로 — 와이드 경로 사용).
+bool readFileBytes(const std::string& utf8, std::vector<uint8_t>& out) {
+    const int wlen = MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), -1, nullptr, 0);
+    if (wlen <= 0) return false;
+    std::wstring wpath((std::size_t)wlen, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), -1, &wpath[0], wlen);
+    std::ifstream f(wpath.c_str(), std::ios::binary | std::ios::ate);
+    if (!f) return false;
+    const std::streamsize size = f.tellg();
+    if (size <= 0) return false;
+    out.resize((std::size_t)size);
+    f.seekg(0);
+    f.read((char*)out.data(), size);
+    return (bool)f;
 }
 
 // 표준 튜닝 개방현 (위 = 1번줄 high E). 표기 라벨은 타브 관례(e B G D A E).
@@ -84,26 +113,155 @@ bool assignString(int note, int& strOut, int& fretOut) {
 
 void drawGuitarTab(AppState& state) {
     if (!state.showTab) return;
-    ImGui::SetNextWindowSize(ImVec2(760, 260), ImGuiCond_FirstUseEver);
-    if (!ImGui::Begin("타브 악보", &state.showTab)) {
+    ImGui::SetNextWindowSize(ImVec2(960, 460), ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin("기타 연습", &state.showTab)) {
+        ImGui::End();
+        return;
+    }
+    drawPendingWindowBackground(); // 창별 배경 이미지 (예약이 있으면)
+
+    // ── 연습 트랙 목록 (곡의 MIDI 트랙과 완전히 분리) ──
+    std::vector<int> pracIdx;
+    for (int i = 0; i < (int)state.song.tracks.size(); ++i)
+        if (state.song.tracks[(std::size_t)i].practice) pracIdx.push_back(i);
+    // 선택 보정: 없어졌거나 연습 트랙이 아니면 첫 연습 트랙으로
+    if (state.practiceTrack >= (int)state.song.tracks.size() ||
+        (state.practiceTrack >= 0 &&
+         !state.song.tracks[(std::size_t)state.practiceTrack].practice))
+        state.practiceTrack = -1;
+    if (state.practiceTrack < 0 && !pracIdx.empty()) state.practiceTrack = pracIdx[0];
+
+    if (pracIdx.empty()) {
+        ImGui::TextWrapped(
+            "연습 트랙이 없습니다. 트랙을 만들고 타브(PDF/텍스트)를 가져오면 "
+            "악보를 보며 연습할 수 있습니다.\n"
+            "여기의 트랙은 곡 작업용 MIDI 트랙과 완전히 별개입니다.");
+        ImGui::Spacing();
+        if (ImGui::Button("연습 트랙 만들기", ImVec2(160, 0))) addPracticeTrack(state);
         ImGui::End();
         return;
     }
 
-    // 대상 트랙: 선택 트랙 (기타 트랙이 아니어도 보여준다 — 표기는 동일)
-    if (state.selectedTrack < 0 || state.selectedTrack >= (int)state.song.tracks.size()) {
-        ImGui::TextDisabled("트랙이 없습니다. + 트랙 → 기타 트랙으로 시작하세요.");
+    // ── 왼쪽: 연습 트랙 패널 (선택 / 추가·삭제 / 녹음 / 입력 채널) ──
+    ImGui::BeginChild("prac_tracks", ImVec2(186, 0), ImGuiChildFlags_Borders);
+    if (ImGui::Button("+ 트랙", ImVec2(82, 0))) addPracticeTrack(state);
+    ImGui::SameLine();
+    if (ImGui::Button("삭제", ImVec2(82, 0)) && state.practiceTrack >= 0) {
+        deleteTrack(state, state.practiceTrack);
+        state.practiceTrack = -1;
+        ImGui::EndChild();
         ImGui::End();
-        return;
+        return; // 인덱스가 바뀌었다 — 다음 프레임에 다시 그린다
     }
+    ImGui::Separator();
+    for (int idx : pracIdx) {
+        auto& t = state.song.tracks[(std::size_t)idx];
+        ImGui::PushID(idx);
+        const bool sel = (idx == state.practiceTrack);
+        const bool inTab =
+            std::find(state.tabTracks.begin(), state.tabTracks.end(), idx) !=
+            state.tabTracks.end();
+        char lbl[128];
+        std::snprintf(lbl, sizeof(lbl), "%s%s", inTab ? "* " : "  ", t.name.c_str());
+        if (ImGui::Selectable(lbl, sel)) {
+            if (ImGui::GetIO().KeyShift)
+                toggleTabTrack(state, idx); // Shift+클릭 = 같이 띄우기
+            else
+                state.practiceTrack = idx;
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s\nShift+클릭: 여러 트랙 동시 표시(*)", t.name.c_str());
+        // 녹음 준비/진행 (오디오 입력 → 이 트랙에 클립으로)
+        const bool recThis = (state.audioRecTrack == idx);
+        if (recThis) ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(200, 60, 60, 255));
+        if (ImGui::SmallButton(recThis ? "■ 정지" : "● 녹음")) {
+            if (recThis)
+                stopAudioRecording(state);
+            else
+                startAudioRecording(state, idx);
+        }
+        if (recThis) ImGui::PopStyleColor();
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("오디오 입력(ASIO/일반)을 이 트랙에 녹음합니다.\n"
+                              "연주를 녹음해 다시 들어볼 수 있습니다.");
+        // ASIO 저지연 모니터 — 판정에 쓰는 입력을 여는 스위치이기도 하다.
+        // (ASIO 듀플렉스 스트림은 하나뿐이라 한 번에 한 트랙만)
+        if (state.audioInput) {
+            auto* in = state.audioInput;
+            const bool asioThis = (state.asioTrack == idx);
+            ImGui::SameLine();
+            if (asioThis) {
+                ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(60, 130, 90, 255));
+                if (ImGui::SmallButton("ASIO 중지")) {
+                    in->stopAsio();
+                    state.asioTrack = -1;
+                    refreshPlaybackIfPlaying(state);
+                }
+                ImGui::PopStyleColor();
+            } else {
+                if (ImGui::SmallButton("ASIO")) {
+                    // ASIO가 이미 켜져 있으면 스트림을 재시작하지 않고 소유권만
+                    // 넘긴다 — 드라이버 재개폐가 시스템을 멈추게 하던 원인 제거.
+                    // (startAsio는 같은 장치면 채널 모드만 갱신하고 그대로 둔다)
+                    if (in->startAsio(state.asioDeviceIndex, t.inputChannelMode)) {
+                        state.asioTrack = idx; // 모니터 버스는 매 프레임 이걸 따라간다
+                        state.statusMessage = "ASIO 입력 = 이 트랙 (저지연)";
+                    } else {
+                        state.statusMessage =
+                            "ASIO를 열 수 없습니다 (설정 > 개인설정 > ASIO에서 장치 확인)";
+                    }
+                }
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("ASIO 저지연 입력을 이 트랙으로 잡습니다.\n"
+                                      "연습 판정에 쓸 입력도 이걸로 열립니다.\n"
+                                      "(ASIO 스트림은 하나뿐 — 다른 트랙에서 누르면 옮겨집니다)");
+            }
+        }
+        ImGui::SetNextItemWidth(90);
+        const char* kIn[] = {"입력 1+2", "입력 1", "입력 2"};
+        int im = std::clamp(t.inputChannelMode, 0, 2);
+        if (ImGui::Combo("##in", &im, kIn, 3)) {
+            t.inputChannelMode = im;
+            // 이 트랙이 지금 입력을 잡고 있으면 즉시 반영 (안 하면 이전 채널로 계속 됨)
+            if (state.audioInput && state.asioTrack == idx)
+                state.audioInput->setInputChannelMode(im);
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("ASIO 입력 채널 선택 (기타를 꽂은 채널).\n"
+                              "이 트랙이 ASIO 입력 중이면 바로 적용됩니다.");
+        // 볼륨 + 레벨 미터 (이 트랙 버스의 신호 — 포스트 FX·페이더)
+        ImGui::SetNextItemWidth(104);
+        ImGui::SliderFloat("##vol", &t.volume, 0.0f, 1.5f, "%.2f");
+        if (ImGui::IsItemActivated()) state.snapshot();
+        if (ImGui::IsItemHovered() || ImGui::IsItemActive())
+            ImGui::SetTooltip("볼륨 %.0f%%", t.volume * 100.0f);
+        ImGui::SameLine();
+        {
+            const int bus = t.channel & 0x0F;
+            miniMeterH("##lvl", state.meterBus[bus], state.busPeakCache[bus], 46.0f,
+                       ImGui::GetFrameHeight() * 0.62f);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("입력/재생 레벨 (이펙트·볼륨 적용 후).\n"
+                                  "클릭: 클리핑 표시 해제");
+        }
+        // FX 체인: 앰프 시뮬·오버드라이브 등을 걸어 연습 톤을 만든다.
+        // (판정은 이펙트 앞의 드라이 신호로 하므로 톤을 바꿔도 정확도에 영향 없음)
+        if (state.vst) drawTrackFxChain(state, idx, 160.0f, 74.0f, /*withInstrument=*/false);
+        ImGui::Separator();
+        ImGui::PopID();
+    }
+    ImGui::EndChild();
+    ImGui::SameLine();
+    ImGui::BeginGroup(); // 오른쪽: 툴바 + 타브
 
-    // ── 표시할 트랙들: state.tabTracks (비어 있으면 선택 트랙 하나) ──
+    // ── 표시할 트랙들: state.tabTracks (비어 있으면 선택한 연습 트랙 하나) ──
     std::vector<int> shown;
     for (int idx : state.tabTracks)
         if (idx >= 0 && idx < (int)state.song.tracks.size() &&
+            state.song.tracks[(std::size_t)idx].practice &&
             std::find(shown.begin(), shown.end(), idx) == shown.end())
             shown.push_back(idx);
-    if (shown.empty()) shown.push_back(state.selectedTrack);
+    if (shown.empty()) shown.push_back(state.practiceTrack);
 
     // ── 연습 모드 상태 (리듬 게임식 판정) ──
     // 레인에는 "음 단위"로 기록한다 — 코드는 구성음마다 울렸는지/빠졌는지 보여준다.
@@ -167,44 +325,11 @@ void drawGuitarTab(AppState& state) {
         s_activeEv.clear();
     };
 
-    // ── 툴바 ──
+    // ── 툴바 ── (표시 트랙 선택은 왼쪽 트랙 패널의 Shift+클릭이 담당)
     if (shown.size() == 1)
-        ImGui::Text("%s%s", state.song.tracks[(std::size_t)shown[0]].name.c_str(),
-                    state.song.tracks[(std::size_t)shown[0]].isGuitar ? " (기타)" : "");
+        ImGui::TextUnformatted(state.song.tracks[(std::size_t)shown[0]].name.c_str());
     else
         ImGui::Text("트랙 %d개 표시", (int)shown.size());
-    ImGui::SameLine();
-    if (ImGui::Button("표시 트랙")) ImGui::OpenPopup("##tabtracks");
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("타브 창에 함께 띄울 트랙을 고릅니다.\n"
-                          "기타 1·2를 같이 보면서 비교할 수 있습니다.");
-    if (ImGui::BeginPopup("##tabtracks")) {
-        if (ImGui::MenuItem("기타 트랙 전부")) {
-            state.tabTracks.clear();
-            for (int i = 0; i < (int)state.song.tracks.size(); ++i)
-                if (state.song.tracks[(std::size_t)i].isGuitar) state.tabTracks.push_back(i);
-        }
-        if (ImGui::MenuItem("선택 트랙만")) state.tabTracks.clear();
-        ImGui::Separator();
-        for (int i = 0; i < (int)state.song.tracks.size(); ++i) {
-            auto& t = state.song.tracks[(std::size_t)i];
-            ImGui::PushID(i);
-            bool on = std::find(state.tabTracks.begin(), state.tabTracks.end(), i) !=
-                      state.tabTracks.end();
-            trackTypeBadge(t);
-            if (ImGui::Checkbox(t.name.c_str(), &on)) {
-                if (on) {
-                    state.tabTracks.push_back(i);
-                } else {
-                    state.tabTracks.erase(
-                        std::remove(state.tabTracks.begin(), state.tabTracks.end(), i),
-                        state.tabTracks.end());
-                }
-            }
-            ImGui::PopID();
-        }
-        ImGui::EndPopup();
-    }
     ImGui::SameLine();
     ImGui::SetNextItemWidth(140);
     ImGui::SliderFloat("확대##tab", &state.tabZoom, 0.02f, 0.5f, "%.2f px/tick");
@@ -218,16 +343,44 @@ void drawGuitarTab(AppState& state) {
     ImGui::SameLine();
     if (ImGui::Button(s_practice ? "연습 끝" : "연습")) {
         s_practice = !s_practice;
-        if (s_practice) pracReset();
+        if (s_practice) {
+            pracReset();
+            // 판정은 입력 스트림이 열려 있어야 한다. 안 열려 있으면 ASIO(저지연)를
+            // 먼저 시도하고, 안 되면 일반 입력이라도 연다 — 사용자가 '연습'만
+            // 눌러도 바로 칠 수 있게. (실패하면 아래 경고가 뜬다)
+            if (state.audioInput && !state.audioInput->asioActive() &&
+                !state.audioInput->inputActive()) {
+                auto& t0 = state.song.tracks[(std::size_t)shown[0]];
+                if (state.audioInput->startAsio(state.asioDeviceIndex,
+                                                t0.inputChannelMode)) {
+                    state.asioTrack = shown[0];
+                    state.statusMessage = "연습 시작 — ASIO 모니터를 켰습니다";
+                } else if (state.audioInput->startInput()) {
+                    state.statusMessage =
+                        "연습 시작 — 일반 입력을 켰습니다 (ASIO가 지연이 훨씬 적습니다)";
+                }
+            }
+        }
     }
     if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("기타를 오디오 입력(ASIO 모니터/녹음 입력)에 연결하고\n"
-                          "재생과 함께 첫 번째 표시 트랙을 따라 쳐 보세요.\n"
+        ImGui::SetTooltip("기타를 오디오 입력에 연결하고 재생과 함께 따라 쳐 보세요.\n"
+                          "누르면 입력(ASIO 우선)이 자동으로 열립니다.\n"
                           "음정과 박자를 판정합니다: GREAT(±60ms) / GOOD(±140ms) / BAD.\n"
                           "친 음은 맨 아래 '연주' 줄에 표시됩니다.");
+    if (s_practice && state.audioInput && !state.audioInput->asioActive() &&
+        !state.audioInput->inputActive()) {
+        ImGui::SameLine();
+        ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.4f, 1.0f), "입력 안 열림!");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("오디오 입력을 열지 못했습니다 — 판정이 동작하지 않습니다.\n"
+                              "설정 > 개인설정 > ASIO에서 장치를 확인하거나,\n"
+                              "왼쪽 트랙의 [ASIO] 버튼을 눌러 보세요.");
+    }
     if (s_practice) {
-        // 연습 대상 트랙 고르기
-        if (s_pracChoice >= (int)state.song.tracks.size()) s_pracChoice = -1;
+        // 연습 대상 트랙 고르기 (연습 트랙만 — 곡 트랙은 여기 나오지 않는다)
+        if (s_pracChoice >= (int)state.song.tracks.size() ||
+            (s_pracChoice >= 0 && !state.song.tracks[(std::size_t)s_pracChoice].practice))
+            s_pracChoice = -1;
         ImGui::SameLine();
         ImGui::SetNextItemWidth(150);
         const char* preview =
@@ -235,9 +388,8 @@ void drawGuitarTab(AppState& state) {
                              : state.song.tracks[(std::size_t)s_pracChoice].name.c_str();
         if (ImGui::BeginCombo("##practrack", preview)) {
             if (ImGui::Selectable("자동 (첫 표시 트랙)", s_pracChoice < 0)) s_pracChoice = -1;
-            for (int i = 0; i < (int)state.song.tracks.size(); ++i) {
+            for (int i : pracIdx) {
                 ImGui::PushID(i);
-                trackTypeBadge(state.song.tracks[(std::size_t)i]);
                 if (ImGui::Selectable(state.song.tracks[(std::size_t)i].name.c_str(),
                                       s_pracChoice == i))
                     s_pracChoice = i;
@@ -264,11 +416,17 @@ void drawGuitarTab(AppState& state) {
                                           ImVec4(0.4f, 0.9f, 0.4f, 1.0f)};
             ImGui::TextColored(kJC[s_lastJudge], "%s", kJ[s_lastJudge]);
         }
-        // 입력 레벨 + 감도 — "인식이 안 될" 때 원인을 눈으로 확인
+        // 입력 레벨 + 감도 — "인식이 안 될" 때 원인을 눈으로 확인.
+        // 이건 판정이 실제로 듣는 드라이 입력이다 (이펙트·볼륨 적용 전) —
+        // 왼쪽 트랙의 미터(포스트 FX)와 달라도 정상이다.
         ImGui::SameLine();
-        ImGui::ProgressBar(std::min(1.0f, s_inLevel * 3.0f), ImVec2(70.0f, 0.0f), "");
+        ImGui::TextUnformatted("입력");
+        ImGui::SameLine();
+        static AppState::MeterView s_inMeter;
+        miniMeterH("##inlvl", s_inMeter, s_inLevel, 80.0f, ImGui::GetFrameHeight() * 0.62f);
         if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("입력 레벨 — 칠 때 움직여야 정상입니다");
+            ImGui::SetTooltip("판정이 듣는 입력 레벨 (드라이 — 이펙트 앞).\n"
+                              "칠 때 움직여야 정상입니다. 클릭: 클리핑 표시 해제");
         if (ImGui::GetTime() - s_lastInputAt > 1.0) {
             ImGui::SameLine();
             ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.3f, 1.0f), "입력 없음!");
@@ -312,7 +470,266 @@ void drawGuitarTab(AppState& state) {
         }
     }
     ImGui::SameLine();
-    ImGui::TextDisabled("표준 튜닝 EADGBE · 로우 포지션 자동 배정 · 편집은 피아노 롤에서");
+    ImGui::TextDisabled("표준 튜닝 EADGBE · 로우 포지션 자동 배정");
+
+    // ── 트랜스포트 (연습 창 안에서 완결되게: 재생 · 템포 · 메트로놈) ──
+    {
+        const bool playingNow = state.player && state.player->isPlaying();
+        if (ImGui::Button(playingNow ? "■ 정지##pracplay" : "▶ 재생##pracplay",
+                          ImVec2(78, 0))) {
+            if (playingNow) stopTransport(state);
+            else startPlayback(state);
+        }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("재생/정지 (스페이스바와 같음)");
+        ImGui::SameLine();
+        if (ImGui::Button("|◀ 처음##pracrew")) seekTo(state, 0, /*scrollView=*/false);
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(120);
+        float bpmF = (float)state.song.bpm;
+        if (ImGui::DragFloat("템포##prac", &bpmF, 0.5f, 20.0f, 300.0f, "%.0f BPM")) {
+            if (ImGui::IsItemActivated()) state.snapshot();
+            state.song.bpm = std::clamp((double)bpmF, 20.0, 300.0);
+            refreshPlaybackIfPlaying(state);
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("곡 템포. 느리게 잡고 연습하다 조금씩 올리세요.\n"
+                              "반주를 물렸다면 [템포에 맞추기]를 다시 눌러야 합니다.");
+        ImGui::SameLine();
+        if (ImGui::Checkbox("메트로놈##prac", &state.metronome))
+            state.statusMessage = state.metronome ? "메트로놈 켬" : "메트로놈 끔";
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("재생 중 박마다 클릭. 마디 첫 박은 강조음입니다.\n"
+                              "소리·음량은 설정 > 개인설정에서 바꿀 수 있습니다.");
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(80);
+        ImGui::SliderFloat("클릭##pracvol", &state.metroVolume, 0.0f, 1.5f, "%.2f");
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("메트로놈 음량");
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(90);
+        const char* kSig[] = {"4/4", "3/4", "6/8"};
+        int sig = std::clamp(state.metroSigIndex, 0, 2);
+        if (ImGui::Combo("박자##prac", &sig, kSig, 3)) state.metroSigIndex = sig;
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("박자표 — 메트로놈 강조와 마디선 기준입니다.\n"
+                              "타브를 가져오면 악보의 박자로 자동 설정됩니다.");
+        ImGui::SameLine();
+        ImGui::Checkbox("카운트인##prac", &state.countIn);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("녹음 전 한 마디 클릭을 세고 시작합니다");
+
+        // ── 루프 (마디 단위) ── 어려운 구간만 반복해서 연습한다
+        const uint32_t tpbL = songTicksPerBar(state);
+        ImGui::Checkbox("루프##prac", &state.loopEnabled);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("아래 구간을 반복 재생합니다 — 어려운 마디만 집중 연습.\n"
+                              "루프가 돌 때마다 판정 기록이 새로 시작됩니다.");
+        ImGui::SameLine();
+        int sb = (int)(state.loopStartTick / tpbL) + 1;
+        int eb = (int)((state.loopEndTick + tpbL - 1) / tpbL);
+        ImGui::SetNextItemWidth(84);
+        if (ImGui::InputInt("##loopsb", &sb)) {
+            state.loopStartTick = (uint32_t)std::max(0, sb - 1) * tpbL;
+            if (state.loopEndTick <= state.loopStartTick)
+                state.loopEndTick = state.loopStartTick + tpbL;
+        }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("루프 시작 마디");
+        ImGui::SameLine();
+        ImGui::TextUnformatted("~");
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(84);
+        if (ImGui::InputInt("마디##loopeb", &eb)) {
+            state.loopEndTick = (uint32_t)std::max(1, eb) * tpbL;
+            if (state.loopEndTick <= state.loopStartTick)
+                state.loopEndTick = state.loopStartTick + tpbL;
+        }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("루프 끝 마디 (이 마디까지 포함)");
+        ImGui::SameLine();
+        if (ImGui::Button("현재 마디##loopcur")) {
+            // 재생 위치가 든 마디 하나를 루프로 — 막히는 마디에서 바로 누른다
+            const uint32_t bar = state.playPosTick / tpbL;
+            state.loopStartTick = bar * tpbL;
+            state.loopEndTick = (bar + 1) * tpbL;
+            state.loopEnabled = true;
+            state.statusMessage = "루프 = " + std::to_string(bar + 1) + "마디";
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("재생 위치의 마디 하나를 루프로 잡습니다.\n"
+                              "막히는 마디에서 누르면 바로 반복 연습이 됩니다.");
+        ImGui::SameLine();
+        if (ImGui::Button("+2마디##loopgrow")) {
+            state.loopEndTick += 2 * tpbL;
+            state.loopEnabled = true;
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("루프 끝을 2마디 늘립니다 — 되면 조금씩 넓혀가세요");
+        ImGui::SameLine();
+        ImGui::TextDisabled("반복 %d회", state.loopCount);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("이 루프를 몇 바퀴 돌았는지");
+    }
+
+    // ── 반주 (MP3/WAV) ──
+    // 반주는 선택한 연습 트랙 위의 보통 클립이다 — 아래 레인에서 파형을 보며
+    // 드래그해 악보와 맞춘다. 원래 BPM을 알려주면 곡 템포를 낮췄을 때
+    // [템포에 맞추기]로 음정을 유지한 채 같이 늘려준다.
+    {
+        const double songBpm = state.song.bpm > 1.0 ? state.song.bpm : 120.0;
+        // 트랙에서 반주 클립이 사라졌으면(삭제 등) 슬롯도 비운다
+        if (state.practiceBackingClip) {
+            bool onTrack = false;
+            for (const auto& t : state.song.tracks)
+                for (const auto& c : t.clips)
+                    if (c == state.practiceBackingClip) onTrack = true;
+            if (!onTrack) {
+                state.practiceBackingClip.reset();
+                state.practiceBacking.reset();
+                state.practiceBackingMadeRatio = 0.0;
+            }
+        }
+        if (!state.practiceBackingClip) {
+            if (ImGui::Button("반주 열기 (MP3/WAV)")) {
+                const std::string path = openAudioDialog();
+                if (!path.empty()) {
+                    std::vector<uint8_t> bytes;
+                    if (readFileBytes(path, bytes)) {
+                        std::string nm = path;
+                        const std::size_t sl = nm.find_last_of("/\\");
+                        if (sl != std::string::npos) nm = nm.substr(sl + 1);
+                        auto clip = audio::decodeAudioAuto(bytes.data(), bytes.size(), nm);
+                        if (clip && state.practiceTrack >= 0) {
+                            state.snapshot();
+                            clip->startTick = 0;
+                            // 재생본은 원본과 별개 객체 — 나중에 다시 늘릴 때
+                            // 원본이 그대로 남아 있어야 겹쳐 늘리지 않는다.
+                            auto play = std::make_shared<audio::AudioClip>(*clip);
+                            play->buildPeaks();
+                            state.song.tracks[(std::size_t)state.practiceTrack]
+                                .clips.push_back(play);
+                            state.practiceBacking = clip; // 원본 보관 (재스트레치용)
+                            state.practiceBackingClip = play;
+                            state.practiceBackingMadeRatio = 1.0;
+                            rebuildAudioMix(state);
+                            refreshPlaybackIfPlaying(state);
+                            state.statusMessage =
+                                "반주 추가: " + nm +
+                                " — 원래 BPM을 입력하고 파형을 드래그해 맞추세요";
+                        } else if (!clip) {
+                            state.statusMessage = "반주 디코드 실패: " + nm;
+                        } else {
+                            state.statusMessage = "연습 트랙을 먼저 고르세요";
+                        }
+                    } else {
+                        state.statusMessage = "반주 파일을 읽지 못했습니다";
+                    }
+                }
+            }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("연습용 반주를 선택한 연습 트랙에 클립으로 넣습니다.\n"
+                                  "아래 레인에서 파형을 보며 드래그해 악보와 맞추세요.");
+        } else {
+            ImGui::TextUnformatted("반주:");
+            ImGui::SameLine();
+            ImGui::TextColored(ImVec4(0.6f, 0.8f, 1.0f, 1.0f), "%s",
+                               state.practiceBackingClip->name.c_str());
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(96);
+            float obpm = (float)state.practiceBackingBpm;
+            if (ImGui::DragFloat("원본 BPM", &obpm, 0.5f, 30.0f, 300.0f, "%.0f"))
+                state.practiceBackingBpm = std::clamp((double)obpm, 30.0, 300.0);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("이 음원의 원래 템포입니다.\n"
+                                  "곡 템포와 이 값의 비율만큼 반주를 늘이거나 줄입니다.");
+            // 지금 재생본이 필요한 배율로 만들어져 있는가?
+            // (곡 템포·원본 BPM 둘 중 뭘 고쳐도 배율이 달라져 다시 잡힌다)
+            const double ratio = state.practiceBackingBpm / songBpm; // >1 = 느리게(길게)
+            const bool fresh = std::fabs(state.practiceBackingMadeRatio - ratio) < 0.001;
+            ImGui::SameLine();
+            ImGui::BeginDisabled(fresh || !state.practiceBacking);
+            if (ImGui::Button("템포에 맞추기")) {
+                // 항상 원본에서 늘린다 (스트레치를 겹쳐 걸면 음질이 무너진다).
+                // 드래그로 맞춰둔 위치(startTick)는 그대로 유지한다.
+                std::shared_ptr<audio::AudioClip> out;
+                if (std::fabs(ratio - 1.0) < 0.001)
+                    out = std::make_shared<audio::AudioClip>(*state.practiceBacking);
+                else
+                    out = audio::stretchClipPitchPreserve(*state.practiceBacking, ratio);
+                if (out) {
+                    state.snapshot();
+                    out->name = state.practiceBacking->name;
+                    out->startTick = state.practiceBackingClip->startTick;
+                    out->gain = state.practiceBackingClip->gain;
+                    out->buildPeaks();
+                    // 트랙 위의 옛 재생본을 새 것으로 바꿔 끼운다
+                    for (auto& t : state.song.tracks)
+                        for (auto& c : t.clips)
+                            if (c == state.practiceBackingClip) c = out;
+                    state.practiceBackingClip = out;
+                    state.practiceBackingMadeRatio = ratio;
+                    char msg[160];
+                    std::snprintf(msg, sizeof(msg), "반주를 %.0f BPM에 맞춤 (%.2f배%s)",
+                                  songBpm, ratio,
+                                  (ratio < 0.5 || ratio > 2.0) ? " — 음질 저하 구간"
+                                                               : ", 음정 유지");
+                    state.statusMessage = msg;
+                    rebuildAudioMix(state);
+                    refreshPlaybackIfPlaying(state);
+                } else {
+                    state.statusMessage = "반주 스트레치 실패 (음원이 너무 짧습니다)";
+                }
+            }
+            ImGui::EndDisabled();
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip(fresh ? "이미 현재 곡 템포에 맞춰져 있습니다"
+                                        : "지금 곡 템포에 맞게 반주를 늘입니다 (음정 유지).\n"
+                                          "맞춰둔 위치는 그대로 두고, 몇 초 걸릴 수 있습니다.");
+            // 상태: 맞음(초록) / 어긋남(주황, 몇 배가 필요한지)
+            ImGui::SameLine();
+            if (fresh) {
+                ImGui::TextColored(ImVec4(0.5f, 0.9f, 0.5f, 1.0f), "%.0f BPM", songBpm);
+            } else {
+                ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.4f, 1.0f), "%.0f BPM (%.2f배 필요)",
+                                   songBpm, ratio);
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip(
+                        "반주가 지금 템포에 안 맞습니다 — [템포에 맞추기]를 누르세요.");
+            }
+            if (ratio < 0.5 || ratio > 2.0) {
+                ImGui::SameLine();
+                ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.4f, 1.0f), "(!)");
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("원본의 절반~두 배를 벗어나면 소리가 뭉개집니다.\n"
+                                      "템포를 덜 극단적으로 잡아 주세요.");
+            }
+            // 시작 위치: 레인 드래그가 주 조작이고, 여기선 초 단위 미세조정
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(120);
+            const double spt = 60.0 / (songBpm * (double)state.song.ppqn); // 초/틱
+            float startSec = (float)((double)state.practiceBackingClip->startTick * spt);
+            if (ImGui::DragFloat("시작", &startSec, 0.005f, 0.0f, 600.0f, "%.3fs")) {
+                state.practiceBackingClip->startTick =
+                    (uint32_t)std::max(0.0, (double)startSec / spt);
+                rebuildAudioMix(state);
+                refreshPlaybackIfPlaying(state);
+            }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("반주가 시작하는 위치 (초).\n"
+                                  "아래 레인에서 파형을 드래그하는 게 더 편합니다.");
+            ImGui::SameLine();
+            if (ImGui::Button("반주 빼기")) {
+                state.snapshot();
+                for (auto& t : state.song.tracks)
+                    t.clips.erase(std::remove(t.clips.begin(), t.clips.end(),
+                                              state.practiceBackingClip),
+                                  t.clips.end());
+                state.practiceBackingClip.reset();
+                state.practiceBacking.reset();
+                state.practiceBackingMadeRatio = 0.0;
+                rebuildAudioMix(state);
+                refreshPlaybackIfPlaying(state);
+                state.statusMessage = "반주 제거";
+            }
+        }
+    }
 
     // ── 연습 판정 엔진 (매 프레임) ──
     // 연습 대상: 사용자가 고른 트랙, 없으면 첫 번째 표시 트랙
@@ -604,8 +1021,21 @@ void drawGuitarTab(AppState& state) {
                 std::vector<std::size_t> onIdx; // 울린 구성음의 pnotes 인덱스
                 if (!silent) {
                     for (std::size_t k = ev.beg; k < ev.end; ++k) {
-                        const int off = audio::noteRiseAt(span.data(), n, kPre, sr,
-                                                          (int)pnotes[k].note, rise);
+                        // 같은 코드의 다른 구성음 배음은 이웃 비교에서 제외 —
+                        // 예: G코드에서 B2의 3배음(F#4)이 G4 바로 아래 대역에
+                        // 정당하게 얹히는데, 이걸 이웃으로 세면 G3이 기각된다.
+                        static std::vector<double> exHz;
+                        exHz.clear();
+                        for (std::size_t j = ev.beg; j < ev.end; ++j) {
+                            if (j == k) continue;
+                            const double f0 =
+                                440.0 *
+                                std::pow(2.0, ((double)pnotes[j].note - 69.0) / 12.0);
+                            for (int h = 1; h <= 6; ++h) exHz.push_back(f0 * h);
+                        }
+                        const int off = audio::noteRiseAt(
+                            span.data(), n, kPre, sr, (int)pnotes[k].note, rise,
+                            exHz.empty() ? nullptr : exHz.data(), (int)exHz.size());
                         if (off < 0) continue;
                         deltas.push_back(
                             (float)((double)(int32_t)(start + (uint32_t)off - posT) /
@@ -891,7 +1321,7 @@ void drawGuitarTab(AppState& state) {
                     state.snapshot();
                     const uint32_t tpbI = songTicksPerBar(state);
                     const uint32_t base = state.playPosTick / tpbI * tpbI; // 현재 마디 시작부터
-                    const int firstTrack = state.selectedTrack;
+                    const int firstTrack = state.practiceTrack;
 
                     // 트랙 배정: 같은 악보(그룹 키)의 같은 파트가 이미 있으면 그 트랙을
                     // 재사용한다 — 꼬리표가 프로젝트에 저장되므로 앱을 껐다 켜도,
@@ -902,7 +1332,8 @@ void drawGuitarTab(AppState& state) {
                     auto findTagged = [&](std::size_t part) -> int {
                         if (groupKey.empty()) return -1;
                         for (std::size_t i = 0; i < state.song.tracks.size(); ++i)
-                            if (state.song.tracks[i].importKey == groupKey &&
+                            if (state.song.tracks[i].practice && // 연습 트랙 안에서만
+                                state.song.tracks[i].importKey == groupKey &&
                                 state.song.tracks[i].importPart == (int)part)
                                 return (int)i;
                         return -1;
@@ -914,7 +1345,7 @@ void drawGuitarTab(AppState& state) {
                             if (p == 0) {
                                 idx = firstTrack; // 파트 1은 지금 보고 있는 트랙에
                             } else {
-                                addGuitarTrack(state);
+                                addPracticeTrack(state); // 파트마다 연습 트랙을 늘린다
                                 idx = (int)state.song.tracks.size() - 1;
                             }
                         }
@@ -981,8 +1412,8 @@ void drawGuitarTab(AppState& state) {
                         endAll = std::max(endAll, endTick);
                     }
 
-                    state.selectedTrack = targets[0];
-                    // 파트가 여럿이면 타브 창에 두 기타를 나란히 띄운다
+                    state.practiceTrack = targets[0];
+                    // 파트가 여럿이면 연습 창에 두 기타를 나란히 띄운다
                     if (targets.size() > 1) state.tabTracks = targets;
                     s_lastImportTrack = targets[0];
                     s_lastImportStart = base;
@@ -1006,8 +1437,9 @@ void drawGuitarTab(AppState& state) {
 
                     // 트랙이 늘어나 tracks 벡터가 재할당됐을 수 있다 -> 이 프레임은 여기서 끝낸다
                     ImGui::EndDisabled();
-                    ImGui::End(); // 가져오기 창
-                    ImGui::End(); // 타브 악보 창
+                    ImGui::End();      // 가져오기 창
+                    ImGui::EndGroup(); // 오른쪽 영역 (연습 창 안에서 열려 있다)
+                    ImGui::End();      // 기타 연습 창
                     return;
                 }
             }
@@ -1046,10 +1478,18 @@ void drawGuitarTab(AppState& state) {
     // 연주 판정 레인: 6줄 미니 타브 — 코드 구성음이 줄별로 울림/빠짐 색으로 보인다
     const float kPracRow = 13.0f;
     const float laneH = s_practice ? (kNameH + kPracRow * 6.0f + 4.0f) : 0.0f;
-    const float bodyH = 24.0f + staffH * (float)shown.size() + laneH; // 위 24px = 눈금자
+    // 클립 레인: 위쪽에 트랙별 오디오 클립(반주·녹음)을 파형으로 — 파형을 보며
+    // 드래그해 악보와 맞춘다. 클립이 하나도 없으면 자리를 차지하지 않는다.
+    bool anyClips = false;
+    for (int idx : shown)
+        if (idx >= 0 && !state.song.tracks[(std::size_t)idx].clips.empty()) anyClips = true;
+    const float kClipLaneH = 54.0f;
+    const float clipsH = anyClips ? kClipLaneH * (float)shown.size() : 0.0f;
+    const float bodyH = 24.0f + clipsH + staffH * (float)shown.size() + laneH; // 24 = 눈금자
     const float timelineW = (float)songLen * zoom + 40.0f;
+    auto clipTop = [&](std::size_t k, float y0) { return y0 + 24.0f + kClipLaneH * (float)k; };
     auto staffTop = [&](std::size_t k, float y0) {
-        return y0 + 24.0f + staffH * (float)k + kNameH;
+        return y0 + 24.0f + clipsH + staffH * (float)k + kNameH;
     };
 
     // ── 왼쪽 줄 라벨 (고정) ──
@@ -1058,6 +1498,10 @@ void drawGuitarTab(AppState& state) {
     {
         ImDrawList* ldl = ImGui::GetWindowDrawList();
         const ImVec2 lp0 = ImGui::GetCursorScreenPos();
+        if (anyClips) // 클립 레인 라벨 (반주·녹음 파형이 있는 줄)
+            for (std::size_t k = 0; k < shown.size(); ++k)
+                ldl->AddText(ImVec2(lp0.x + 2.0f, clipTop(k, lp0.y) + 4.0f),
+                             IM_COL32(150, 150, 165, 255), "오디오");
         for (std::size_t k = 0; k < shown.size(); ++k) {
             const float gt = staffTop(k, lp0.y);
             for (int s = 0; s < 6; ++s)
@@ -1088,12 +1532,85 @@ void drawGuitarTab(AppState& state) {
         // 눈금자 + 마디선 (마디선은 모든 보표를 관통)
         dl->AddRectFilled(ImVec2(p0.x, p0.y), ImVec2(p0.x + timelineW, p0.y + 24.0f),
                           IM_COL32(30, 30, 34, 255));
+        // 루프 구간: 반복 중인 마디를 한눈에 (눈금자에 띠 + 본문 옅은 음영)
+        if (state.loopEnabled && state.loopEndTick > state.loopStartTick) {
+            const float lx0 = p0.x + (float)state.loopStartTick * zoom;
+            const float lx1 = p0.x + (float)state.loopEndTick * zoom;
+            dl->AddRectFilled(ImVec2(lx0, p0.y + 24.0f), ImVec2(lx1, p0.y + bodyH),
+                              IM_COL32(90, 150, 230, 26));
+            dl->AddRectFilled(ImVec2(lx0, p0.y), ImVec2(lx1, p0.y + 5.0f),
+                              IM_COL32(90, 160, 245, 220));
+            dl->AddLine(ImVec2(lx0, p0.y), ImVec2(lx0, p0.y + bodyH),
+                        IM_COL32(90, 160, 245, 150));
+            dl->AddLine(ImVec2(lx1, p0.y), ImVec2(lx1, p0.y + bodyH),
+                        IM_COL32(90, 160, 245, 150));
+        }
         for (uint32_t t = 0; t <= songLen; t += tpb) {
             const float x = p0.x + (float)t * zoom;
             dl->AddLine(ImVec2(x, p0.y), ImVec2(x, p0.y + bodyH), IM_COL32(70, 70, 82, 160));
             char bn[16];
             std::snprintf(bn, sizeof(bn), "%u", t / tpb + 1);
             dl->AddText(ImVec2(x + 4.0f, p0.y + 4.0f), IM_COL32(150, 150, 165, 255), bn);
+        }
+
+        // ── 클립 레인: 오디오 클립(반주·녹음)을 파형으로 + 드래그로 위치 맞추기 ──
+        // 반주 시작을 악보에 맞추는 게 목적이라 격자에 스냅하지 않는다 (Shift=마디 스냅).
+        if (anyClips) {
+            static const audio::AudioClip* s_dragClip = nullptr;
+            static float s_dragGrabX = 0.0f; // 클립 시작과 마우스의 간격(px)
+            for (std::size_t k = 0; k < shown.size(); ++k) {
+                auto& tr = state.song.tracks[(std::size_t)shown[k]];
+                const float ly = clipTop(k, p0.y);
+                dl->AddRectFilled(ImVec2(p0.x, ly + 1.0f),
+                                  ImVec2(p0.x + timelineW, ly + kClipLaneH - 1.0f),
+                                  IM_COL32(22, 22, 27, 255));
+                for (auto& cp : tr.clips) {
+                    if (!cp) continue;
+                    const bool isBacking = (cp == state.practiceBackingClip);
+                    drawClipBlock(dl, *cp, p0.x, ly + 1.0f, kClipLaneH - 2.0f, zoom,
+                                  state.song, isBacking);
+                    drawWaveform(dl, *cp, p0.x, ly + 1.0f, kClipLaneH - 2.0f, zoom,
+                                 state.song,
+                                 isBacking ? IM_COL32(150, 200, 255, 220)
+                                           : IM_COL32(170, 170, 190, 200));
+                    // 드래그: 클립 몸통을 잡아 좌우로 옮긴다 (= 반주 시작 맞추기)
+                    const float cx0 = p0.x + (float)cp->startTick * zoom;
+                    const double durTk = cp->durationSeconds() * state.song.bpm / 60.0 *
+                                         (double)state.song.ppqn;
+                    const float cx1 = cx0 + (float)durTk * zoom;
+                    const ImVec2 mp = ImGui::GetIO().MousePos;
+                    const bool overThis = mp.x >= cx0 && mp.x <= cx1 && mp.y >= ly &&
+                                          mp.y <= ly + kClipLaneH;
+                    if (overThis && ImGui::IsMouseClicked(ImGuiMouseButton_Left) &&
+                        ImGui::IsWindowHovered()) {
+                        s_dragClip = cp.get();
+                        s_dragGrabX = mp.x - cx0;
+                        state.snapshot();
+                    }
+                    if (s_dragClip == cp.get()) {
+                        if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+                            float nx = mp.x - s_dragGrabX - p0.x;
+                            uint32_t nt = (uint32_t)std::max(0.0f, nx / zoom);
+                            if (ImGui::GetIO().KeyShift) nt = (nt + tpb / 2) / tpb * tpb;
+                            cp->startTick = nt;
+                            ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+                        } else {
+                            s_dragClip = nullptr;
+                            rebuildAudioMix(state);
+                            refreshPlaybackIfPlaying(state);
+                        }
+                    }
+                    if (overThis && ImGui::IsWindowHovered())
+                        ImGui::SetTooltip("%s — 드래그로 위치 맞추기 (Shift: 마디 스냅)\n"
+                                          "시작 %.3fs",
+                                          cp->name.c_str(),
+                                          (double)cp->startTick * 60.0 /
+                                              (state.song.bpm * (double)state.song.ppqn));
+                }
+                dl->AddLine(ImVec2(p0.x, ly + kClipLaneH - 1.0f),
+                            ImVec2(p0.x + timelineW, ly + kClipLaneH - 1.0f),
+                            IM_COL32(60, 60, 72, 255));
+            }
         }
 
         for (std::size_t k = 0; k < shown.size(); ++k) {
@@ -1206,14 +1723,19 @@ void drawGuitarTab(AppState& state) {
             }
         }
 
-        // 재생 헤드 + 클릭 = 그 위치로 이동
+        // 재생 헤드 + 클릭 = 그 위치로 이동.
+        // 클립 레인 안의 클릭은 클립 드래그용이므로 재생 위치를 옮기지 않는다.
         const float hx = p0.x + (float)state.playPosTick * zoom;
         dl->AddLine(ImVec2(hx, p0.y), ImVec2(hx, p0.y + bodyH), IM_COL32(255, 90, 90, 220),
                     1.5f);
         if (ImGui::IsItemClicked(ImGuiMouseButton_Left)) {
-            const float mx = ImGui::GetIO().MousePos.x;
-            const uint32_t t = mx > p0.x ? (uint32_t)((mx - p0.x) / zoom) : 0;
-            seekTo(state, t, /*scrollView=*/false);
+            const ImVec2 mp = ImGui::GetIO().MousePos;
+            const bool inClipLane =
+                anyClips && mp.y >= p0.y + 24.0f && mp.y < p0.y + 24.0f + clipsH;
+            if (!inClipLane) {
+                const uint32_t t = mp.x > p0.x ? (uint32_t)((mp.x - p0.x) / zoom) : 0;
+                seekTo(state, t, /*scrollView=*/false);
+            }
         }
         // 재생 따라가기 (다른 편집기와 동일)
         const bool playing = state.player && state.player->isPlaying();
@@ -1224,6 +1746,7 @@ void drawGuitarTab(AppState& state) {
         }
     }
     ImGui::EndChild();
+    ImGui::EndGroup(); // 오른쪽(툴바 + 타브) 끝 — 왼쪽 트랙 패널과 나란히
     ImGui::End();
 }
 

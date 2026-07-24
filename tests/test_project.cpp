@@ -350,6 +350,25 @@ void testClipGain() {
     }
     p.song.tracks[0].tabHints.clear();
 
+    // 연습 트랙 표시 왕복 (tprc 라인) — 이 플래그가 살아 있어야 프로젝트를 다시
+    // 열었을 때도 연습 트랙이 MIDI 트랙 목록에 섞이지 않는다.
+    p.song.tracks[0].practice = true;
+    {
+        const std::string tp = project::serialize(p);
+        CHECK(tp.find("tprc 1") != std::string::npos);
+        project::ProjectData qp;
+        CHECK(project::deserialize(qp, tp));
+        CHECK(qp.song.tracks.size() == 1 && qp.song.tracks[0].practice);
+    }
+    p.song.tracks[0].practice = false;
+    { // 기본값(연습 아님)은 줄을 쓰지 않는다 — 옛 프로젝트도 그대로 읽힌다
+        const std::string tp = project::serialize(p);
+        CHECK(tp.find("tprc") == std::string::npos);
+        project::ProjectData qp;
+        CHECK(project::deserialize(qp, tp));
+        CHECK(qp.song.tracks.size() == 1 && !qp.song.tracks[0].practice);
+    }
+
     // 볼륨/팬 오토메이션 왕복 (tautov/tautop 라인)
     p.song.tracks[0].volAuto.push_back({480, 0.5f});
     p.song.tracks[0].panAuto.push_back({960, -0.25f});

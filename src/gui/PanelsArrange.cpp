@@ -190,6 +190,7 @@ void drawArrange(AppState& state) {
         ImGui::End();
         return;
     }
+    drawPendingWindowBackground(); // 창별 배경 이미지 (예약이 있으면)
     const auto secs = buildSections(state);
     if (secs.empty()) {
         ImGui::TextDisabled("구간 마커가 없습니다.");

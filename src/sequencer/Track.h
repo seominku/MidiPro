@@ -59,6 +59,10 @@ struct Track {
     bool frozen = false;
     // 기타 트랙 표시: 선택하면 타브(TAB) 악보 창이 열린다 (소리엔 영향 없음)
     bool isGuitar = false;
+    // 기타 연습 트랙: '기타 연습' 창에서만 보이고 다루는 트랙.
+    // MIDI 쪽 창(트랙 뷰·믹서·피아노 롤)에는 나타나지 않는다 — 연습용 악보와
+    // 곡 작업용 트랙이 한 목록에 섞이면 헷갈리기 때문. 재생/녹음/저장은 동일.
+    bool practice = false;
     // 타브 가져오기 그룹 꼬리표: 같은 악보를 다시 가져오면 새 트랙을 만들지 않고
     // (importKey=악보 이름, importPart=파트 번호)가 같은 트랙을 찾아 덮어쓴다.
     std::string importKey;

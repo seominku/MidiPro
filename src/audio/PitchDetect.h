@@ -124,9 +124,13 @@ inline bool notePresent(const float* x, int n, double sr, int midi) {
 // midi 음의 배음 에너지(target)와 반음 이웃 에너지(neigh)를 잰다.
 // notePresent와 같은 배음·디튠(±30센트) 규칙. neigh<0 = 이웃 비교 불가
 // (창이 짧아 어떤 배음도 반음 분해능이 안 나올 때).
+// exHz: 이웃 비교에서 제외할 주파수들(±60센트) — 같은 코드의 다른 구성음이
+// 배음을 이웃 대역에 정당하게 얹는 경우(예: G코드에서 B2의 3배음 F#4가
+// G4 바로 아래) 그 대역을 이웃으로 세면 정상 음이 기각된다.
 inline void noteBandPower(const float* x, int n, double sr, int midi,
                           double* tgtOut, double* nghOut,
-                          int* strongOut = nullptr) {
+                          int* strongOut = nullptr, const double* exHz = nullptr,
+                          int nEx = 0) {
     // Hann 창: 사각창 Goertzel은 1~2반음 옆의 큰 소리가 1/Δ²로 누설돼
     // (예: A3가 G3 대역에 3~4%) 헛 배음을 만든다. Hann이면 수백 배 준다.
     static thread_local std::vector<float> hann;
@@ -156,16 +160,38 @@ inline void noteBandPower(const float* x, int n, double sr, int midi,
         tgt += ph[usedT];
         ++usedT;
         if (fh * kSemi >= res * 1.3) {
-            ngh += 0.5 * (goertzelPower(x, n, sr, fh * up) +
-                          goertzelPower(x, n, sr, fh * dn));
-            ++usedN;
+            auto excluded = [&](double f) {
+                for (int e = 0; e < nEx; ++e) {
+                    const double r = f / exHz[e];
+                    if (r > 0.966 && r < 1.035) return true; // ±60센트
+                }
+                return false;
+            };
+            const double fu = fh * up, fd = fh * dn;
+            int cnt = 0;
+            double s = 0.0;
+            if (!excluded(fu)) {
+                s += goertzelPower(x, n, sr, fu);
+                ++cnt;
+            }
+            if (!excluded(fd)) {
+                s += goertzelPower(x, n, sr, fd);
+                ++cnt;
+            }
+            if (cnt > 0) {
+                ngh += s * (cnt == 2 ? 0.5 : 1.0);
+                ++usedN;
+            }
         }
     }
     *tgtOut = tgt;
     *nghOut = usedN > 0 ? ngh : -1.0;
     if (strongOut) {
-        // "서 있는" 배음 수 — 다른 음의 배음 하나가 우연히 겹친 헛 크레딧은
-        // 배음 1개에 몰려 있고, 진짜 그 음이 울리면 여러 배음이 함께 선다.
+        // "서 있는" 배음 수 — 다른 음의 "고차" 배음 하나가 우연히 겹친 헛
+        // 크레딧은 높은 배음 1개에 몰려 있고, 진짜 그 음이 울리면 여러 배음이
+        // 함께 서거나 최소한 기본음 대역이 선다. 저음 코드에서는 베이스의
+        // 배음이 기본음 대역을 지배해 에너지가 한 대역에 몰릴 수 있으므로,
+        // 기본음이 서 있으면 배음 1개여도 인정한다 (옥타브 관용과 같은 급).
         // 사용할 수 있는 배음이 애초에 1개뿐이면(초고음) 판별 불가로 -1.
         if (usedT < 2) {
             *strongOut = -1;
@@ -173,6 +199,7 @@ inline void noteBandPower(const float* x, int n, double sr, int midi,
             int st = 0;
             for (int i = 0; i < usedT; ++i)
                 if (ph[i] >= tgt * 0.08) ++st;
+            if (st == 1 && ph[0] >= tgt * 0.08) st = 2;
             *strongOut = st;
         }
     }
@@ -187,7 +214,7 @@ inline void noteBandPower(const float* x, int n, double sr, int midi,
 // (프레임 경계 때문에 실제 어택보다 일정하게 이르거나 늦을 수 있다 — 계통
 // 편차는 자동 지연 보정이 흡수하므로 상대 타이밍만 정확하면 된다.)
 inline int noteRiseAt(const float* x, int n, int scan0, double sr, int midi,
-                      double rise) {
+                      double rise, const double* exHz = nullptr, int nEx = 0) {
     constexpr int kFrame = 4096, kHopR = 1024, kGap = 4; // 4 hop = 85ms
     const int pre = kGap * kHopR;
     if (!x || sr <= 0.0 || scan0 < pre || scan0 + pre + kFrame > n) return -1;
@@ -206,7 +233,7 @@ inline int noteRiseAt(const float* x, int n, int scan0, double sr, int midi,
         if (tgtV[(std::size_t)i] >= 0.0) return;
         double t = 0.0, g = 0.0;
         int s = 0;
-        noteBandPower(x + i * kHopR, kFrame, sr, midi, &t, &g, &s);
+        noteBandPower(x + i * kHopR, kFrame, sr, midi, &t, &g, &s, exHz, nEx);
         double e = 0.0;
         const float* q = x + i * kHopR;
         for (int k = 0; k < kFrame; ++k) e += (double)q[k] * q[k];
