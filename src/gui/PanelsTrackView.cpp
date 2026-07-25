@@ -26,6 +26,27 @@ namespace midipro::gui {
 // 박스가 줌 핸들러보다 늦게 그려져서 한 프레임 지연 판정이 필요하다.
 static bool g_fxBoxHoveredNow = false;
 
+// 스냅 격자 한 칸의 틱 수 (트랙 뷰 눈금·스냅 공용). 박자표(tpb)를 나눠 쓴다.
+static uint32_t trackSnapTicks(const AppState& state, uint32_t tpb) {
+    const uint32_t beat = std::max<uint32_t>(1, (uint32_t)state.song.ppqn);
+    switch (state.trackSnapDiv) {
+    case 0: return std::max<uint32_t>(1, tpb);       // 1마디
+    case 1: return std::max<uint32_t>(1, tpb / 2);   // 1/2마디
+    case 2: return beat;                             // 1박
+    case 3: return std::max<uint32_t>(1, beat / 2);  // 1/2박
+    case 4: return std::max<uint32_t>(1, beat / 4);  // 1/4박(16분)
+    default: return beat;
+    }
+}
+
+// 스냅이 켜져 있으면 틱을 격자에 반올림한다. 꺼져 있으면 그대로.
+static uint32_t applyTrackSnap(const AppState& state, uint32_t tpb, long tick) {
+    if (!state.trackSnap) return (uint32_t)std::max<long>(0, tick);
+    const long g = (long)trackSnapTicks(state, tpb);
+    if (g <= 0) return (uint32_t)std::max<long>(0, tick);
+    return (uint32_t)std::max<long>(0, ((tick + g / 2) / g) * g);
+}
+
 // ---------------------------------------------------------
 // 트랙 FX 체인 박스 (트랙 뷰 · 기타 연습 창 공용)
 // ---------------------------------------------------------
@@ -311,6 +332,14 @@ void drawTrackList(AppState& state) {
             // 우클릭 -> 삭제 메뉴
             if (ImGui::BeginPopupContextItem("trkctx")) {
                 state.selectedTrack = i;
+                if (ImGui::MenuItem("이 트랙에 MIDI 불러오기...")) {
+                    // 실제 파일 열기·병합은 App이 처리한다 (재생 위치부터 얹는다)
+                    state.midiImportTrack = i;
+                    state.midiImportRequested = true;
+                }
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip(".mid 파일을 트랙 뷰의 트랙 위로 끌어다 놓아도 됩니다");
+                ImGui::Separator();
                 if (ImGui::MenuItem("트랙 삭제")) deleteTrack(state, i);
                 ImGui::EndPopup();
             }
@@ -387,6 +416,20 @@ void drawTrackView(AppState& state) {
         state.pianoRollZoom = std::clamp(state.pianoRollZoom * 1.3f, 0.02f, 2.0f);
     ImGui::SameLine();
     ImGui::TextDisabled("(휠: 확대/축소)");
+
+    // ── 스냅: 클립/구간을 격자에 맞춘다. 격자 눈금도 이 설정대로 그린다 ──
+    ImGui::SameLine();
+    ImGui::TextUnformatted("| 스냅:");
+    ImGui::SameLine();
+    ImGui::Checkbox("##snapon", &state.trackSnap);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("켜면 클립을 옮길 때 아래 격자에 딱 맞춰집니다.");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(96);
+    const char* kSnapDivs[] = {"1마디", "1/2", "1박", "1/2박", "1/4박"};
+    ImGui::Combo("##snapdiv", &state.trackSnapDiv, kSnapDivs, 5);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("격자 간격. 세로선이 이 간격으로 그려지고, 스냅도 여기에 맞춥니다.");
 
     // ASIO 장치/버퍼 설정은 '설정 > 개인설정 > ASIO' 탭으로 옮겼다.
 
@@ -1596,7 +1639,8 @@ void drawTrackView(AppState& state) {
                         const double mouseTick = std::max(0.0, (double)(mx - p0.x) / zoom);
                         if (cd.mode == AppState::ClipDrag::Move) {
                             const long ns = (long)mouseTick - cd.grabTickOffset;
-                            clip.startTick = (uint32_t)(ns < 0 ? 0 : ns);
+                            clip.startTick = applyTrackSnap(state, tpb, ns); // 격자 스냅
+
                             // 다른 레인 위로 끌면 대상 트랙을 테두리로 알려준다
                             const float myv = ImGui::GetIO().MousePos.y;
                             for (int li = 0; li < (int)state.laneRects.size() &&
@@ -1808,7 +1852,17 @@ void drawTrackView(AppState& state) {
                               track.frozen ? IM_COL32(34, 48, 62, 255)
                                            : (sel ? IM_COL32(46, 52, 64, 255)
                                                   : IM_COL32(36, 36, 42, 255)));
-            // 마디선
+            // 격자: 마디선(밝게) + 스냅 간격의 보조선(어둡게). 보조선이 너무
+            // 촘촘하면(간격 5px 미만) 지저분하므로 그때는 마디선만 그린다.
+            const uint32_t sub = trackSnapTicks(state, tpb);
+            if (sub > 0 && sub < tpb && (float)sub * zoom >= 5.0f) {
+                for (uint32_t t = 0; t <= songLen; t += sub) {
+                    if (t % tpb == 0) continue; // 마디선은 아래서 더 밝게 다시 그린다
+                    const float x = p0.x + t * zoom;
+                    dl->AddLine(ImVec2(x, p0.y), ImVec2(x, p0.y + laneH),
+                                IM_COL32(58, 58, 68, 90));
+                }
+            }
             for (uint32_t t = 0; t <= songLen; t += tpb) {
                 const float x = p0.x + t * zoom;
                 dl->AddLine(ImVec2(x, p0.y), ImVec2(x, p0.y + laneH), IM_COL32(70, 70, 82, 120));

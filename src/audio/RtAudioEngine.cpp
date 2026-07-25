@@ -156,6 +156,12 @@ bool RtAudioEngine::openPort(unsigned /*index*/) {
     // 믹스 포맷과 어긋나면 스트림이 안 열리거나 리샘플링이 끼는 것을 피한다.
     // (예: 포커스라이트 44100, 다수 온보드 48000)
     if (info.preferredSampleRate > 0) m_sampleRate = (double)info.preferredSampleRate;
+    // 사용자가 직접 고른 값이 있으면 그것을 우선한다. 장치가 지원하는 목록에
+    // 있을 때만 쓴다 (없는 값을 넣으면 스트림이 아예 안 열린다).
+    if (m_preferredSampleRate > 0) {
+        for (unsigned r : info.sampleRates)
+            if (r == m_preferredSampleRate) { m_sampleRate = (double)m_preferredSampleRate; break; }
+    }
 
     unsigned frames = m_bufferFrames;
 
@@ -1014,6 +1020,33 @@ void RtAudioEngine::setInputChannelMode(int mode) {
     if (m_asioOn.load(std::memory_order_acquire)) return;
     const bool was = m_inOpen.load(std::memory_order_acquire);
     if (was) { stopInput(); startInput(); } // WASAPI는 채널 수가 바뀌므로 재시작
+}
+
+// 사용자가 고른 샘플레이트로 출력을 다시 연다. 장치가 그 값을 지원하지 않으면
+// openPort가 무시하고 장치 기본값을 쓴다(스트림이 안 열리는 것보다 낫다).
+// WASAPI 전용 — ASIO는 드라이버가 샘플레이트를 정하므로 여기서 건드리지 않는다.
+void RtAudioEngine::setPreferredSampleRate(unsigned hz) {
+    if (hz == m_preferredSampleRate) return;
+    m_preferredSampleRate = hz;
+    if (m_asioOn.load(std::memory_order_acquire)) return; // ASIO 중엔 반영 안 함
+    const bool outWas = m_open.load(std::memory_order_acquire);
+    const bool inWas = m_inOpen.load(std::memory_order_acquire);
+    if (inWas) stopInput();
+    if (outWas) closePort();
+    if (outWas) openPort(0); // 새 샘플레이트로 재시작 (VST reconfigure는 openPort 안에서)
+    if (inWas) startInput();
+}
+
+std::vector<unsigned> RtAudioEngine::supportedSampleRates() const {
+    std::vector<unsigned> out;
+    if (!m_audio) return out;
+    unsigned dev = m_deviceId ? m_deviceId : m_audio->getDefaultOutputDevice();
+    RtAudio::DeviceInfo info = m_audio->getDeviceInfo(dev);
+    // 흔히 쓰는 값만 추린다 (드라이버는 8000~192000까지 잔뜩 보고하기도 한다)
+    for (unsigned r : info.sampleRates)
+        if (r == 44100 || r == 48000 || r == 88200 || r == 96000 || r == 176400 || r == 192000)
+            out.push_back(r);
+    return out;
 }
 
 void RtAudioEngine::setBufferFrames(unsigned frames) {

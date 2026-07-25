@@ -816,7 +816,19 @@ void deleteTrack(AppState& state, int index) {
     }
     stopTransport(state);
     state.snapshot();
+    // 오디오 엔진은 악기/이펙트/EQ를 트랙이 아니라 "채널 번호"로 들고 있다.
+    // 트랙만 지우고 엔진 채널을 안 비우면, 같은 채널을 재사용하는 새 트랙에
+    // 옛 악기·이펙트·EQ가 그대로 남는다(사용자가 겪은 버그). 지우는 트랙의
+    // 채널을 다른 트랙이 안 쓸 때만 엔진 상태도 함께 비운다.
+    const int goneChannel = state.song.tracks[(std::size_t)index].channel & 0x0F;
     state.song.tracks.erase(state.song.tracks.begin() + index);
+    bool channelStillUsed = false;
+    for (const auto& t : state.song.tracks)
+        if ((t.channel & 0x0F) == goneChannel) { channelStillUsed = true; break; }
+    if (!channelStillUsed && state.vst) {
+        state.vst->clearTrackInstrument(goneChannel);
+        state.vst->clearTrackEffects(goneChannel); // EQ 포함 (EQ도 이펙트 체인에 있다)
+    }
 
     const auto remap = [&](int x) { // 삭제된 트랙 = -1, 그 뒤는 한 칸 당김
         return x < index ? x : (x == index ? -1 : x - 1);
@@ -2317,7 +2329,11 @@ void drawMenuBar(AppState& state, bool& openRequested, bool& saveRequested) {
         } else if (validTrack && !state.song.tracks[state.selectedTrack].clips.empty())
             deleteTrackClip(state, state.selectedTrack, -1); // 가장 최근 클립부터
         else
-            deleteTrack(state, state.selectedTrack);
+            // 지울 게 아무것도 없으면 아무 일도 하지 않는다. 예전엔 여기서
+            // "선택된 트랙 자체"를 지웠는데, 트랙 뷰가 계속 선택된 채라 노트를
+            // 지우려고 Delete를 누르다 트랙이 통째로 날아가는 사고가 났다.
+            // 트랙 삭제는 트랙 헤더 우클릭 > "트랙 삭제"로만 한다.
+            state.statusMessage = "지울 대상이 없습니다 (트랙 삭제는 트랙 우클릭 메뉴)";
     }
 
     if (ImGui::BeginMainMenuBar()) {
@@ -2453,7 +2469,7 @@ void drawMenuBar(AppState& state, bool& openRequested, bool& saveRequested) {
         ImGui::SetNextWindowSize(ImVec2(360, 0), ImGuiCond_FirstUseEver);
         if (ImGui::Begin("MidiPro 정보", &state.showAbout,
                          ImGuiWindowFlags_AlwaysAutoResize)) {
-            ImGui::TextUnformatted("MidiPro 1.2");
+            ImGui::TextUnformatted("MidiPro 1.2.1");
             ImGui::TextDisabled("MIDI 시퀀서 + 오디오 녹음 + VST3 호스트");
             ImGui::Text("빌드: %s", __DATE__);
             ImGui::Separator();
@@ -2812,13 +2828,49 @@ static void drawAsioBody(AppState& state) {
     }
 
     ImGui::SeparatorText("버퍼 (레이턴시)");
-    // 버퍼는 자동: ASIO 드라이버가 권장하는 크기를 그대로 사용한다.
     const double sr = state.audioClips ? state.audioClips->engineSampleRate() : 48000.0;
     if (in->asioActive()) {
-        ImGui::Text("자동 (드라이버 권장): %u 프레임  ≈ %.1f ms", in->bufferFrames(),
+        // ASIO는 드라이버가 버퍼·샘플레이트를 정한다 — 여기서는 보여주기만.
+        ImGui::Text("ASIO 자동 (드라이버 권장): %u 프레임  ≈ %.1f ms", in->bufferFrames(),
                     1000.0 * (double)in->bufferFrames() / std::max(1.0, sr));
+        ImGui::TextDisabled("ASIO에서는 버퍼·샘플레이트를 드라이버 제어판에서 바꿉니다.");
     } else {
-        ImGui::TextDisabled("자동 (드라이버 권장) — ASIO를 시작하면 실제 값이 표시됩니다");
+        // WASAPI(기본 출력): 사용자가 버퍼 크기와 샘플레이트를 직접 고른다.
+        ImGui::TextDisabled("작을수록 지연이 줄지만, 너무 작으면 소리가 끊깁니다.");
+        static const unsigned kBufSizes[] = {64, 128, 256, 512, 1024, 2048};
+        char blabel[48];
+        std::snprintf(blabel, sizeof(blabel), "%u 프레임 (%.1f ms)", in->bufferFrames(),
+                      1000.0 * (double)in->bufferFrames() / std::max(1.0, sr));
+        ImGui::SetNextItemWidth(200);
+        if (ImGui::BeginCombo("버퍼 크기", blabel)) {
+            for (unsigned b : kBufSizes) {
+                char it[48];
+                std::snprintf(it, sizeof(it), "%u 프레임 (%.1f ms)", b,
+                              1000.0 * (double)b / std::max(1.0, sr));
+                if (ImGui::Selectable(it, b == in->bufferFrames())) in->setBufferFrames(b);
+            }
+            ImGui::EndCombo();
+        }
+
+        const auto rates = in->supportedSampleRates();
+        if (!rates.empty()) {
+            const unsigned cur = (unsigned)std::lround(sr);
+            char rlabel[32];
+            std::snprintf(rlabel, sizeof(rlabel), "%u Hz", cur);
+            ImGui::SetNextItemWidth(200);
+            if (ImGui::BeginCombo("샘플레이트", rlabel)) {
+                // '장치 기본'으로 되돌리는 선택지
+                if (ImGui::Selectable("장치 기본값", in->preferredSampleRate() == 0))
+                    in->setPreferredSampleRate(0);
+                for (unsigned r : rates) {
+                    char it[32];
+                    std::snprintf(it, sizeof(it), "%u Hz", r);
+                    if (ImGui::Selectable(it, r == cur)) in->setPreferredSampleRate(r);
+                }
+                ImGui::EndCombo();
+            }
+            ImGui::TextDisabled("※ 바꾸면 출력을 잠깐 다시 엽니다. 올려둔 악기도 새 값으로 맞춰집니다.");
+        }
     }
 }
 

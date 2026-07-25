@@ -13,7 +13,7 @@
 ; =============================================================
 
 #define AppName "MidiPro"
-#define AppVersion "1.2.0"
+#define AppVersion "1.2.1"
 #define AppPublisher "seominku"
 #define AppExe "MidiPro.exe"
 ; 앱이 만드는 뮤텍스 이름. 설치 중 "프로그램이 실행 중입니다"를 정확히 알아내

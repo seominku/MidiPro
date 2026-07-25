@@ -237,13 +237,15 @@ void drawPianoRoll(AppState& state) {
     // 위 헤더(콤보) 높이를 빼고도 조절 영역이 충분하도록 넉넉히 잡는다.
     const float kVelLaneH = state.editMode ? 100.0f : 0.0f;
 
-    constexpr int kLowNote = 36;  // C2
-    constexpr int kHighNote = 84; // C6
+    // 표준 88건반: A0(21) ~ C8(108). 둘 다 포함(inclusive).
+    // (예전엔 C2~C6이었고 최상단 음이 필터에서 빠져 C6 노트가 안 보이던 버그가 있었다)
+    constexpr int kLowNote = 21;   // A0
+    constexpr int kHighNote = 108; // C8
     constexpr float kRulerH = 22.0f; // 상단 눈금자(마디번호) 높이
     constexpr float kKeyW = 46.0f;   // 왼쪽 고정 건반 열 폭
     // 행 높이는 글자(라벨)가 잘리지 않도록 폰트 줄 높이 이상으로 잡는다.
     const float kRowHeight = std::max(15.0f, ImGui::GetTextLineHeight() + 3.0f);
-    const int rows = kHighNote - kLowNote;
+    const int rows = kHighNote - kLowNote + 1; // 양끝 포함
     const float gridH = rows * kRowHeight;
     const float contentH = kRulerH + gridH;
 
@@ -284,6 +286,18 @@ void drawPianoRoll(AppState& state) {
                 ImGui::SetScrollX(
                     std::max(0.0f, ImGui::GetScrollX() + tickAtCursor * (newZoom - zoom)));
             }
+        }
+    }
+
+    // 88건반은 세로로 길어서 맨 위(C8)부터 보이면 낯설다. 처음 한 번은
+    // 가운데 C(60) 근처가 화면 중앙에 오도록 스크롤을 맞춘다.
+    {
+        static bool centered = false;
+        if (!centered) {
+            centered = true;
+            const int midRow = kHighNote - 60; // 중앙 C의 행
+            const float target = midRow * kRowHeight - ImGui::GetWindowHeight() * 0.5f;
+            ImGui::SetScrollY(std::max(0.0f, target));
         }
     }
 
@@ -379,7 +393,7 @@ void drawPianoRoll(AppState& state) {
             if (state.song.tracks[(std::size_t)gt].practice) continue; // 연습 트랙 제외
             const auto ghost = seq::extractNotes(state.song.tracks[(std::size_t)gt]);
             for (const auto& n : ghost) {
-                if (n.note < kLowNote || n.note >= kHighNote) continue;
+                if (n.note < kLowNote || n.note > kHighNote) continue;
                 const int r = kHighNote - n.note;
                 const float gx0 = origin.x + n.startTick * zoom;
                 const float gx1 = origin.x + n.endTick * zoom;
@@ -393,7 +407,7 @@ void drawPianoRoll(AppState& state) {
 
     // 노트 블록 (선택된 노트는 강조)
     for (const auto& n : notes) {
-        if (n.note < kLowNote || n.note >= kHighNote) continue;
+        if (n.note < kLowNote || n.note > kHighNote) continue;
         const int r = kHighNote - n.note;
         const float x0 = origin.x + n.startTick * zoom;
         const float x1 = origin.x + n.endTick * zoom;
@@ -543,7 +557,7 @@ void drawPianoRoll(AppState& state) {
                     box.active = false;
                     const int bn = box.anchorNote;
                     bool occupied = false;
-                    if (bn >= kLowNote && bn < kHighNote) {
+                    if (bn >= kLowNote && bn <= kHighNote) {
                         seq::noteSpanAt(track, (uint8_t)bn, box.anchorTick, occupied);
                         if (!occupied) {
                             state.snapshot();
@@ -613,7 +627,7 @@ void drawPianoRoll(AppState& state) {
             // 페인트: 드래그 경로의 격자 칸마다 노트를 깐다 (이미 있는 칸은 건너뜀).
             // 빠르게 움직여 칸을 건너뛰면 지난 칸도 직선 보간으로 채운다.
             if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
-                if (relX >= 0 && hoverNote >= kLowNote && hoverNote < kHighNote) {
+                if (relX >= 0 && hoverNote >= kLowNote && hoverNote <= kHighNote) {
                     const uint32_t pt = snap(hoverTick);
                     if (pt != paintLastTick || hoverNote != paintLastNote) {
                         const uint32_t len =
@@ -637,7 +651,7 @@ void drawPianoRoll(AppState& state) {
                             const int nn = (int)std::lround(
                                 paintLastNote + (hoverNote - paintLastNote) * f);
                             const uint32_t st = snap(tk);
-                            if (nn < kLowNote || nn >= kHighNote) continue;
+                            if (nn < kLowNote || nn > kHighNote) continue;
                             if (paintCells.count(st)) continue; // 이번 스트로크: 칸당 하나
                             bool occ = false;
                             seq::noteSpanAt(track, (uint8_t)nn, st, occ);
@@ -664,7 +678,7 @@ void drawPianoRoll(AppState& state) {
             const bool rightClick = ImGui::IsMouseClicked(ImGuiMouseButton_Right);
             bool found = false;
             seq::NoteSpan hit{};
-            if (hoverNote >= kLowNote && hoverNote < kHighNote)
+            if (hoverNote >= kLowNote && hoverNote <= kHighNote)
                 hit = seq::noteSpanAt(track, (uint8_t)hoverNote, hoverTick, found);
 
             // 노트 오른쪽 끝 근처면 "길이 조절" 커서로 알려준다
@@ -730,7 +744,7 @@ void drawPianoRoll(AppState& state) {
                 // 만진 노트가 "직전 노트"가 된다 (Shift+클릭 복제용)
                 state.lastNoteDurationTicks = hit.endTick - hit.startTick;
                 state.lastNoteVelocity = hit.velocity;
-            } else if (leftClick && !found && hoverNote >= kLowNote && hoverNote < kHighNote) {
+            } else if (leftClick && !found && hoverNote >= kLowNote && hoverNote <= kHighNote) {
                 // 빈 칸 좌클릭 -> 노트 추가 + "페인트" 시작 (드래그하면 경로에 연달아 생성)
                 state.selectedNotes.clear();
                 state.snapshot(); // 스트로크 전체가 언두 1회

@@ -284,6 +284,9 @@ public:
     int inputChannelMode() const override { return m_inMode; }
     void setBufferFrames(unsigned frames) override;
     unsigned bufferFrames() const override { return m_bufferFrames; }
+    void setPreferredSampleRate(unsigned hz) override;
+    unsigned preferredSampleRate() const override { return m_preferredSampleRate; }
+    std::vector<unsigned> supportedSampleRates() const override;
     bool startInput() override;
     void stopInput() override;
     bool inputActive() const override { return m_inOpen.load(std::memory_order_acquire); }
@@ -346,6 +349,7 @@ private:
 
     double m_sampleRate = 44100.0;
     unsigned m_bufferFrames = 512;
+    unsigned m_preferredSampleRate = 0; // 사용자 지정(0=장치 기본). openPort에서 적용
     unsigned m_deviceId = 0;         // 0=기본 출력. 사용자가 고른 오디오 장치 id
     std::vector<unsigned> m_outIds;  // 마지막 listOutputDevices() 결과의 장치 id(인덱스 대응)
     std::vector<float> m_monoBuffer; // 콜백용 사전 할당 버퍼 (내장 신스)

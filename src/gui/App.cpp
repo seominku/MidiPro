@@ -161,6 +161,38 @@ std::vector<uint8_t> readFileBytes(const std::string& utf8) {
     return buf;
 }
 
+// .mid를 통째로 새 곡으로 여는 대신, 그 노트들을 지정 트랙에 재생 위치부터
+// 얹는다 (트랙별 MIDI 불러오기 / 드래그 임포트). ppqn이 다르면 틱을 환산한다.
+static bool importMidiIntoTrack(AppState& st, int target, const std::string& utf8Path) {
+    if (target < 0 || target >= (int)st.song.tracks.size()) return false;
+    seq::Song loaded;
+    if (!seq::smf::load(loaded, core::pathFromUtf8(utf8Path))) return false;
+    const double scale =
+        loaded.ppqn > 0 ? (double)st.song.ppqn / (double)loaded.ppqn : 1.0;
+    const uint32_t base = st.playPosTick;
+    auto& dst = st.song.tracks[(std::size_t)target];
+    int added = 0;
+    for (auto& srcT : loaded.tracks) {
+        for (const auto& ns : seq::extractNotes(srcT)) {
+            const uint32_t s = base + (uint32_t)std::llround((double)ns.startTick * scale);
+            const uint32_t dur = std::max<uint32_t>(
+                1, (uint32_t)std::llround((double)(ns.endTick - ns.startTick) * scale));
+            dst.addNote(s, dur, ns.note, ns.velocity ? ns.velocity : 100);
+            ++added;
+        }
+    }
+    dst.sortEvents();
+    return added > 0;
+}
+
+// 경로가 .mid / .midi로 끝나는가 (대소문자 무시)
+static bool isMidiPath(const std::string& p) {
+    std::string l = p;
+    for (auto& c : l) c = (char)tolower((unsigned char)c);
+    return (l.size() > 4 && l.compare(l.size() - 4, 4, ".mid") == 0) ||
+           (l.size() > 5 && l.compare(l.size() - 5, 5, ".midi") == 0);
+}
+
 // Win32 파일 대화상자. 성공 시 경로를 반환한다.
 // outFilterIndex: 사용자가 고른 필터(1부터) — WAV/MP3처럼 형식을 가를 때 쓴다.
 std::string fileDialog(HWND owner, bool save, const wchar_t* filter = L"MIDI 파일 (*.mid)\0*.mid\0모든 파일\0*.*\0",
@@ -1344,6 +1376,25 @@ int App::run() {
                 }
             }
         }
+        // 특정 트랙에 MIDI 불러오기 (우클릭 메뉴). 새 곡으로 열지 않고 노트만 얹는다.
+        if (m_state.midiImportRequested) {
+            m_state.midiImportRequested = false;
+            const int t = m_state.midiImportTrack;
+            const std::string path = fileDialog(hwnd, /*save=*/false);
+            if (!path.empty() && t >= 0 && t < (int)m_state.song.tracks.size()) {
+                m_state.snapshot();
+                const std::size_t sl = path.find_last_of("\\/");
+                const std::string nm = sl == std::string::npos ? path : path.substr(sl + 1);
+                if (importMidiIntoTrack(m_state, t, path)) {
+                    m_state.selectedTrack = t;
+                    refreshPlaybackIfPlaying(m_state);
+                    m_state.statusMessage =
+                        "MIDI 불러오기: " + nm + " → 트랙 " + std::to_string(t + 1);
+                } else {
+                    m_state.statusMessage = "MIDI 불러오기 실패: " + nm;
+                }
+            }
+        }
         if (saveRequested) {
             const std::string path = fileDialog(hwnd, /*save=*/true);
             if (!path.empty()) {
@@ -1682,6 +1733,26 @@ int App::run() {
                         importThemeFile(std::filesystem::u8path(path));
                         continue;
                     }
+                }
+                // MIDI 파일을 떨어뜨리면 새 창/새 곡이 아니라 "떨어뜨린 트랙"에
+                // 노트를 얹는다 (없는 자리에 떨어뜨리면 새 트랙을 만든다).
+                if (isMidiPath(path)) {
+                    if (target < 0 || target >= (int)m_state.song.tracks.size()) {
+                        addTrack(m_state);
+                        target = m_state.selectedTrack;
+                    }
+                    m_state.snapshot();
+                    const std::size_t sl = path.find_last_of("\\/");
+                    const std::string nm = sl == std::string::npos ? path : path.substr(sl + 1);
+                    if (importMidiIntoTrack(m_state, target, path)) {
+                        m_state.selectedTrack = target;
+                        refreshPlaybackIfPlaying(m_state);
+                        m_state.statusMessage = "MIDI 임포트: " + nm + " → 트랙 " +
+                                                std::to_string(target + 1);
+                    } else {
+                        m_state.statusMessage = "MIDI 임포트 실패: " + nm;
+                    }
+                    continue;
                 }
                 const std::vector<uint8_t> bytes = readFileBytes(path);
                 const std::size_t slash = path.find_last_of("\\/");

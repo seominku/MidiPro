@@ -32,6 +32,11 @@ public:
     virtual void setBufferFrames(unsigned frames) = 0;
     virtual unsigned bufferFrames() const = 0;
 
+    // 출력 샘플레이트 지정(WASAPI). 장치가 지원하는 값만 반영, ASIO 중엔 무시.
+    virtual void setPreferredSampleRate(unsigned hz) = 0;
+    virtual unsigned preferredSampleRate() const = 0; // 0 = 장치 기본값
+    virtual std::vector<unsigned> supportedSampleRates() const = 0;
+
     // 캡처 스트림 시작/정지
     virtual bool startInput() = 0;
     virtual void stopInput() = 0;

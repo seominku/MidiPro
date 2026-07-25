@@ -182,6 +182,13 @@ struct AppState {
 
     // 오디오(MP3) 임포트: 선택 트랙에 붙인다
     bool audioImportRequested = false;
+    // 특정 트랙에 MIDI 파일 불러오기 (트랙 우클릭 메뉴 -> App이 파일 열고 병합)
+    bool midiImportRequested = false;
+    int midiImportTrack = -1;
+
+    // 트랙 뷰 스냅: 클립/구간을 격자에 맞춘다. 격자 눈금도 이 간격으로 그린다.
+    bool trackSnap = true;
+    int trackSnapDiv = 2; // 0=1마디 1=1/2마디 2=1박 3=1/2박 4=1/4박
 
     // 내보내기(믹스다운) 설정 창: 재생 없이 오프라인으로 즉시 렌더한다
     bool showExportDialog = false;
