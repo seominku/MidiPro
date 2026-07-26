@@ -174,8 +174,32 @@ static void buildStyle(const ThemeParams& t, ImGuiStyle& s) {
     s.TabRounding = r * 0.75f;
     s.ScrollbarRounding = r;
 
+    // ---- 여백·크기 다듬기 (밋밋함의 상당 부분은 ImGui 기본 여백이 빽빽해서다) ----
+    // (아래 값들은 100% 기준. 함수 끝에서 DPI 배율이 한꺼번에 곱해진다)
+    // 숨 쉴 공간을 주고, 스크롤바·그랩을 조금 키워 "설계된" 느낌을 낸다.
+    s.WindowPadding = ImVec2(10.0f, 10.0f);
+    s.FramePadding = ImVec2(9.0f, 5.0f);
+    s.ItemSpacing = ImVec2(9.0f, 7.0f);
+    s.ItemInnerSpacing = ImVec2(7.0f, 5.0f);
+    s.CellPadding = ImVec2(6.0f, 4.0f);
+    s.GrabMinSize = 12.0f;
+    s.ScrollbarSize = 13.0f;
+    s.WindowTitleAlign = ImVec2(0.02f, 0.5f);
+    s.SeparatorTextBorderSize = 2.0f; // SeparatorText 밑줄을 조금 굵게
+    // 프레임에 아주 옅은 테두리를 줘 입력칸·버튼 경계가 또렷해진다(평면감 완화).
+    s.FrameBorderSize = 1.0f;
+    c[ImGuiCol_Border] = surface(t, light ? -0.12f : 0.20f, 0.5f);
+
+    // DPI 배율 적용: 여백·둥글기·스크롤바 등 모든 치수를 한 번에 키운다.
+    // (테마가 바뀔 때마다 buildStyle이 다시 불리므로 여기서 곱해야 안 잊는다)
+    if (uiDpiScale() != 1.0f) s.ScaleAllSizes(uiDpiScale());
+
     makeSkinKeysUnique(s);
 }
+
+static float g_uiDpiScale = 1.0f;
+void setUiDpiScale(float scale) { g_uiDpiScale = scale > 0.5f ? scale : 1.0f; }
+float uiDpiScale() { return g_uiDpiScale; }
 
 void applyThemeParams(const ThemeParams& t) { buildStyle(t, ImGui::GetStyle()); }
 
@@ -623,6 +647,18 @@ ThemeParams themeHighContrast() { return mk(1.00f, 0.85f, 0.10f, 0.02f, 1.00f, 0
 ThemeParams themeRose() { return mk(0.95f, 0.45f, 0.65f, 0.11f, 0.95f, 9.0f); }
 ThemeParams themeSand() { return mk(0.72f, 0.45f, 0.15f, 0.88f, 0.12f, 5.0f); }
 
+// ---- 모던 프리셋 팩 (2026 추가) — 요즘 DAW 감성의 플랫 팔레트 ----
+// 녹턴: 아주 짙은 남보라 배경 + 청록 포인트, 큼직한 둥글기.
+ThemeParams themeNocturne() { return mk(0.35f, 0.80f, 0.90f, 0.055f, 0.92f, 8.0f); }
+// 드라큘라풍: 짙은 회보라 + 보라/핑크 포인트.
+ThemeParams themeDracula() { return mk(0.74f, 0.58f, 0.98f, 0.09f, 0.95f, 7.0f); }
+// 선셋: 어두운 자주빛 배경 + 주황·산호 포인트, 따뜻한 느낌.
+ThemeParams themeSunset() { return mk(0.98f, 0.48f, 0.35f, 0.085f, 0.94f, 7.0f); }
+// 스튜디오: 뉴트럴 다크 그레이 + 라임 포인트 (모니터링 장비 느낌).
+ThemeParams themeStudio() { return mk(0.70f, 0.90f, 0.30f, 0.10f, 0.90f, 4.0f); }
+// 모노: 미니멀 흑백 + 아주 옅은 청회색 포인트.
+ThemeParams themeMono() { return mk(0.62f, 0.66f, 0.72f, 0.07f, 0.90f, 3.0f); }
+
 const ThemePreset* themePresets() {
     static const ThemePreset kPresets[] = {
         {"다크 (기본)", &themeDark},   {"라이트", &themeLight},
@@ -632,9 +668,13 @@ const ThemePreset* themePresets() {
         {"슬레이트", &themeSlate},     {"노르드", &themeNord},
         {"솔라라이즈드", &themeSolarized}, {"고대비", &themeHighContrast},
         {"로즈", &themeRose},          {"샌드", &themeSand},
+        // 모던 팩
+        {"녹턴", &themeNocturne},      {"드라큘라", &themeDracula},
+        {"선셋", &themeSunset},        {"스튜디오", &themeStudio},
+        {"모노", &themeMono},
     };
     return kPresets;
 }
-int themePresetCount() { return 14; }
+int themePresetCount() { return 19; }
 
 } // namespace midipro::gui

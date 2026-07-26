@@ -88,8 +88,7 @@ void drawPianoRoll(AppState& state) {
             ImGui::SetTooltip("엇박을 뒤로 밀어 그루브를 만듭니다 (격자는 왼쪽 콤보 기준).\n"
                               "선택한 노트가 있으면 선택만, 없으면 트랙 전체.");
         if (ImGui::BeginPopup("swingpr")) {
-            ImGui::SetNextItemWidth(160);
-            ImGui::SliderInt("##prswing", &state.drumSwing, 0, 100, "스윙 %d%%");
+            sliderIntPM("##prswing", &state.drumSwing, 0, 100, 1, "스윙 %d%%", 160.0f);
             if (ImGui::Button("적용##prswing") &&
                 state.selectedTrack < (int)state.song.tracks.size()) {
                 const uint32_t grid = std::max<uint32_t>(
@@ -109,10 +108,9 @@ void drawPianoRoll(AppState& state) {
                               "무작위로 살짝 흔들어 기계적인 느낌을 없앱니다");
         if (ImGui::BeginPopup("humanize")) {
             ImGui::TextDisabled("적용 대상: 선택 노트 (없으면 트랙 전체)");
-            ImGui::SetNextItemWidth(160);
-            ImGui::SliderInt("타이밍 (±틱)", &state.humanTiming, 0, state.song.ppqn / 4);
-            ImGui::SetNextItemWidth(160);
-            ImGui::SliderInt("세기 (±)", &state.humanVel, 0, 30);
+            sliderIntPM("타이밍 (±틱)", &state.humanTiming, 0, state.song.ppqn / 4, 1, "%d",
+                        160.0f);
+            sliderIntPM("세기 (±)", &state.humanVel, 0, 30, 1, "%d", 160.0f);
             if (ImGui::Button("적용") &&
                 state.selectedTrack < (int)state.song.tracks.size()) {
                 auto& trk = state.song.tracks[(std::size_t)state.selectedTrack];
@@ -241,8 +239,8 @@ void drawPianoRoll(AppState& state) {
     // (예전엔 C2~C6이었고 최상단 음이 필터에서 빠져 C6 노트가 안 보이던 버그가 있었다)
     constexpr int kLowNote = 21;   // A0
     constexpr int kHighNote = 108; // C8
-    constexpr float kRulerH = 22.0f; // 상단 눈금자(마디번호) 높이
-    constexpr float kKeyW = 46.0f;   // 왼쪽 고정 건반 열 폭
+    const float kRulerH = 22.0f * uiDpiScale(); // 상단 눈금자(마디번호) 높이
+    const float kKeyW = 46.0f * uiDpiScale();   // 왼쪽 고정 건반 열 폭
     // 행 높이는 글자(라벨)가 잘리지 않도록 폰트 줄 높이 이상으로 잡는다.
     const float kRowHeight = std::max(15.0f, ImGui::GetTextLineHeight() + 3.0f);
     const int rows = kHighNote - kLowNote + 1; // 양끝 포함

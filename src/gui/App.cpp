@@ -8,6 +8,7 @@
 #include "gui/App.h"
 #include "gui/PanelsInternal.h" // addTrackEq (새 트랙 기본 EQ)
 #include "gui/BackgroundImage.h"
+#include "gui/Icons.h"
 #include "gui/Settings.h"
 #include "gui/UiSkin.h"
 #include "gui/Panels.h"
@@ -136,6 +137,14 @@ LRESULT WINAPI wndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             }
         }
         DragFinish(hdrop);
+        return 0;
+    }
+    case WM_DPICHANGED: {
+        // 퍼모니터 DPI: 다른 배율의 모니터로 옮기면 Windows가 권장 크기를 준다.
+        // (폰트 재구축은 아직 안 한다 — 크기만 맞추고, 배율은 시작 시 값 유지)
+        const RECT* r = (const RECT*)lParam;
+        SetWindowPos(hWnd, nullptr, r->left, r->top, r->right - r->left, r->bottom - r->top,
+                     SWP_NOZORDER | SWP_NOACTIVATE);
         return 0;
     }
     case WM_DESTROY:
@@ -984,6 +993,21 @@ int App::run() {
     HWND hwnd = CreateWindowW(wc.lpszClassName, L"MidiPro", WS_OVERLAPPEDWINDOW, 100, 100,
                               1280, 800, nullptr, nullptr, wc.hInstance, nullptr);
 
+    // 창 DPI로 UI 배율 결정 (150% 화면이면 1.5). 폰트는 이 배율만큼 크게 로드하고
+    // 스타일 치수는 buildStyle이 곱한다 — 4K에서 흐릿하지 않고 크기는 그대로.
+    {
+        using GetDpiFn = UINT(WINAPI*)(HWND);
+        HMODULE user32 = GetModuleHandleW(L"user32.dll");
+        auto getDpi = user32 ? (GetDpiFn)(void*)GetProcAddress(user32, "GetDpiForWindow")
+                             : nullptr;
+        const UINT dpi = getDpi ? getDpi(hwnd) : 96;
+        setUiDpiScale((float)dpi / 96.0f);
+        // 처음 창 크기(1280x800)도 배율만큼 키운다 (최대화 전 복원 크기)
+        if (uiDpiScale() != 1.0f)
+            SetWindowPos(hwnd, nullptr, 0, 0, (int)(1280 * uiDpiScale()),
+                         (int)(800 * uiDpiScale()), SWP_NOMOVE | SWP_NOZORDER);
+    }
+
     if (!createDeviceD3D(hwnd)) {
         cleanupDeviceD3D();
         UnregisterClassW(wc.lpszClassName, wc.hInstance);
@@ -1018,6 +1042,8 @@ int App::run() {
     AppSettings settings;
     loadSettings(settings, autosaveDir() / L"settings.ini");
     m_state.softThru = settings.softThru;
+    m_state.startScreenOnLaunch = settings.startScreenOnLaunch;
+    m_state.showStartScreen = settings.startScreenOnLaunch; // 켜기로 돼 있으면 시작 시 표시
     auto findPort = [](const std::vector<std::string>& ports, const std::string& name) {
         for (int i = 0; i < (int)ports.size(); ++i)
             if (ports[(std::size_t)i] == name) return i;
@@ -1040,10 +1066,47 @@ int App::run() {
         }
     }
 
-    // 한글 폰트: Windows 기본 맑은 고딕 + 한국어 글리프 범위
+    // 한글 폰트: Windows 기본 맑은 고딕 + 한국어 + 기호(화살표·미디어·도형) 글리프.
+    // 기호 범위를 넉넉히 넣어 ▶ ■ ● 같은 아이콘 글리프가 확실히 들어오게 한다.
+    static ImVector<ImWchar> s_ranges;
+    {
+        ImFontGlyphRangesBuilder b;
+        b.AddRanges(io.Fonts->GetGlyphRangesKorean());
+        const ImWchar extra[] = {
+            0x2010, 0x205E, // 일반 문장부호
+            0x2190, 0x21FF, // 화살표
+            0x2300, 0x23FF, // 기술기호(⏮ ⏹ ⏺ 등)
+            0x25A0, 0x25FF, // 도형(▶ ■ ● ◀ ▲ ▼)
+            0x2600, 0x26FF, // 기타 기호(♪ ♩ ☰ 등)
+            0x2705, 0x27BF, // 체크·화살표 딩벳
+            0,
+        };
+        b.AddRanges(extra);
+        b.BuildRanges(&s_ranges);
+    }
+    // DPI 배율만큼 폰트를 크게 로드한다 — 150% 화면에서 16px 대신 24px로
+    // 래스터해 흐릿함 없이 같은 크기로 보인다.
+    const float fs = uiDpiScale();
     ImFontConfig fontCfg;
-    io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\malgun.ttf", 16.0f, &fontCfg,
-                                 io.Fonts->GetGlyphRangesKorean());
+    io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\malgun.ttf", 16.0f * fs, &fontCfg,
+                                 s_ranges.Data);
+    // 아이콘 폰트(Segoe MDL2 Assets, Windows 내장)를 본문 폰트에 병합한다.
+    // 문자열 안에 ICON_PLAY 같은 글리프를 섞어 쓸 수 있게 된다 (gui/Icons.h).
+    static const ImWchar s_iconRange[] = {ICONS_RANGE_BEGIN, ICONS_RANGE_END, 0};
+    {
+        ImFontConfig iconCfg;
+        iconCfg.MergeMode = true;
+        iconCfg.GlyphOffset = ImVec2(0.0f, 2.0f * fs); // 한글 폰트와 세로 중심 맞춤
+        io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\segmdl2.ttf", 14.0f * fs, &iconCfg,
+                                     s_iconRange);
+    }
+    // 제목/섹션용 굵은 헤더 폰트 (없으면 일반 맑은 고딕으로 대체). 위계를 준다.
+    ImFont* headerFont = io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\malgunbd.ttf",
+                                                      20.0f * fs, &fontCfg, s_ranges.Data);
+    if (!headerFont)
+        headerFont = io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\malgun.ttf", 20.0f * fs,
+                                                  &fontCfg, s_ranges.Data);
+    setUiHeaderFont(headerFont);
 
     ImGui_ImplWin32_Init(hwnd);
     ImGui_ImplDX11_Init(g_device, g_context);
@@ -1271,7 +1334,8 @@ int App::run() {
             ImGui::DockBuilderSetNodeSize(dockId, ImGui::GetMainViewport()->Size);
 
             ImGuiID center = dockId;
-            const ImGuiID top = ImGui::DockBuilderSplitNode(center, ImGuiDir_Up, 0.16f, nullptr, &center);
+            // 위 16%였는데 DPI 확대 후 내용이 커져 맨 아래 시크 바가 잘렸다 → 20%
+            const ImGuiID top = ImGui::DockBuilderSplitNode(center, ImGuiDir_Up, 0.20f, nullptr, &center);
             const ImGuiID left = ImGui::DockBuilderSplitNode(center, ImGuiDir_Left, 0.20f, nullptr, &center);
             const ImGuiID right = ImGui::DockBuilderSplitNode(center, ImGuiDir_Right, 0.28f, nullptr, &center);
             const ImGuiID bottom = ImGui::DockBuilderSplitNode(center, ImGuiDir_Down, 0.22f, nullptr, &center);
@@ -1288,7 +1352,7 @@ int App::run() {
             ImGui::DockBuilderDockWindow("피아노 롤", centerLower);
             ImGui::DockBuilderDockWindow("드럼 트랙", centerLower); // 피아노 롤 옆 탭
             ImGui::DockBuilderDockWindow("VST3 플러그인", right);
-            ImGui::DockBuilderDockWindow("기타 도우미", right);
+            ImGui::DockBuilderDockWindow("브라우저", right); // 기타 도우미 대신 (Tool로 켤 수 있음)
             ImGui::DockBuilderDockWindow("신디사이저", right);
             ImGui::DockBuilderDockWindow("입력 모니터", bottom);
             ImGui::DockBuilderDockWindow("상태", bottom);
@@ -1359,7 +1423,23 @@ int App::run() {
         themed(kWinVst, &drawVst);
         themed(kWinGuitarHelper, &drawGuitarHelper);
         themed(kWinMonitor, &drawMonitor);
+        drawBrowser(m_state);     // 좌측 브라우저 (악기·이펙트·최근)
+        drawStartScreen(m_state); // 모든 패널 위에 겹치는 시작 화면
         if (scrollReqAtFrameStart) m_state.scrollToPlayhead = false; // 모든 뷰가 반영한 뒤 해제
+
+        // 시작 화면 '새 곡' / '프로젝트 열기' 요청 처리 (메뉴의 새 곡과 같은 동작)
+        if (m_state.newSongRequested) {
+            m_state.newSongRequested = false;
+            stopTransport(m_state);
+            m_state.snapshot();
+            m_state.song = seq::Song{};
+            m_state.selectedTrack = 0;
+            m_state.statusMessage = "새 곡을 만들었습니다";
+        }
+        if (m_state.projectOpenRequested) {
+            m_state.projectOpenRequested = false;
+            m_state.projectLoadRequested = true; // 아래 공용 처리부가 대화상자를 연다
+        }
 
         if (openRequested) {
             const std::string path = fileDialog(hwnd, /*save=*/false);
@@ -1805,6 +1885,7 @@ int App::run() {
     {
         AppSettings out;
         out.softThru = m_state.softThru;
+        out.startScreenOnLaunch = m_state.startScreenOnLaunch;
         if (m_state.input) {
             const auto ports = m_state.input->listPorts();
             out.midiInAutoOpen = m_state.input->isOpen();

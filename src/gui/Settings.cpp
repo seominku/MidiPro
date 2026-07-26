@@ -29,6 +29,7 @@ bool saveSettings(const AppSettings& s, const std::filesystem::path& path) {
     f << "midi_out_auto " << (s.midiOutAutoOpen ? 1 : 0) << '\n';
     if (!s.midiOutPort.empty()) f << "midi_out " << s.midiOutPort << '\n';
     f << "soft_thru " << (s.softThru ? 1 : 0) << '\n';
+    f << "start_screen " << (s.startScreenOnLaunch ? 1 : 0) << '\n';
     return f.good();
 }
 
@@ -47,6 +48,7 @@ bool loadSettings(AppSettings& s, const std::filesystem::path& path) {
         else if (key == "midi_in_auto") { int v = 1; ls >> v; s.midiInAutoOpen = v != 0; }
         else if (key == "midi_out_auto") { int v = 1; ls >> v; s.midiOutAutoOpen = v != 0; }
         else if (key == "soft_thru") { int v = 1; ls >> v; s.softThru = v != 0; }
+        else if (key == "start_screen") { int v = 1; ls >> v; s.startScreenOnLaunch = v != 0; }
         // 모르는 키는 넘어간다 (앞뒤 버전 호환)
     }
     return true;

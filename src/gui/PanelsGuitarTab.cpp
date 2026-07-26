@@ -230,11 +230,9 @@ void drawGuitarTab(AppState& state) {
             ImGui::SetTooltip("ASIO 입력 채널 선택 (기타를 꽂은 채널).\n"
                               "이 트랙이 ASIO 입력 중이면 바로 적용됩니다.");
         // 볼륨 + 레벨 미터 (이 트랙 버스의 신호 — 포스트 FX·페이더)
-        ImGui::SetNextItemWidth(104);
-        ImGui::SliderFloat("##vol", &t.volume, 0.0f, 1.5f, "%.2f");
-        if (ImGui::IsItemActivated()) state.snapshot();
-        if (ImGui::IsItemHovered() || ImGui::IsItemActive())
-            ImGui::SetTooltip("볼륨 %.0f%%", t.volume * 100.0f);
+        bool volEdit = false;
+        sliderFloatPM("##vol", &t.volume, 0.0f, 1.5f, 0.05f, "%.2f", 104.0f, &volEdit);
+        if (volEdit) state.snapshot(); // 편집 시작(슬라이더 잡기/버튼) 시 1회
         ImGui::SameLine();
         {
             const int bus = t.channel & 0x0F;
@@ -246,7 +244,8 @@ void drawGuitarTab(AppState& state) {
         }
         // FX 체인: 앰프 시뮬·오버드라이브 등을 걸어 연습 톤을 만든다.
         // (판정은 이펙트 앞의 드라이 신호로 하므로 톤을 바꿔도 정확도에 영향 없음)
-        if (state.vst) drawTrackFxChain(state, idx, 160.0f, 74.0f, /*withInstrument=*/false);
+        if (state.vst) drawTrackFxChain(state, idx, 160.0f * uiDpiScale(), 74.0f * uiDpiScale(),
+                                       /*withInstrument=*/false);
         ImGui::Separator();
         ImGui::PopID();
     }
@@ -435,14 +434,12 @@ void drawGuitarTab(AppState& state) {
                                   "트랙의 ASIO 모니터 또는 녹음 입력을 켜세요.");
         }
         ImGui::SameLine();
-        ImGui::SetNextItemWidth(90);
-        ImGui::SliderFloat("감도##prac", &s_sens, 0.5f, 2.0f, "%.1f");
-        if (ImGui::IsItemHovered())
+        sliderFloatPM("감도##prac", &s_sens, 0.5f, 2.0f, 0.1f, "%.1f", 90.0f);
+        if (ImGui::IsItemHovered()) // 라벨 위에서
             ImGui::SetTooltip("음 인정 문턱값 배율 — 낮출수록 관대해집니다.\n"
                               "제대로 쳤는데 빨강이 많으면 낮추고, 안 쳐도 인정되면 올리세요.");
         ImGui::SameLine();
-        ImGui::SetNextItemWidth(110);
-        ImGui::SliderFloat("오프셋##prac", &s_judgeOfsMs, -100.0f, 300.0f, "%.0fms");
+        sliderFloatPM("오프셋##prac", &s_judgeOfsMs, -100.0f, 300.0f, 1.0f, "%.0fms", 110.0f);
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("판정 시각 미세조정 — 장치 지연은 자동 보정이 흡수하므로\n"
                               "보통 0으로 두면 됩니다. 자동 보정 후에도 어긋날 때만 조정하세요.");
@@ -501,8 +498,7 @@ void drawGuitarTab(AppState& state) {
             ImGui::SetTooltip("재생 중 박마다 클릭. 마디 첫 박은 강조음입니다.\n"
                               "소리·음량은 설정 > 개인설정에서 바꿀 수 있습니다.");
         ImGui::SameLine();
-        ImGui::SetNextItemWidth(80);
-        ImGui::SliderFloat("클릭##pracvol", &state.metroVolume, 0.0f, 1.5f, "%.2f");
+        sliderFloatPM("클릭##pracvol", &state.metroVolume, 0.0f, 1.5f, 0.05f, "%.2f", 110.0f);
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("메트로놈 음량");
         ImGui::SameLine();
         ImGui::SetNextItemWidth(90);
@@ -1161,11 +1157,9 @@ void drawGuitarTab(AppState& state) {
 
             ImGui::Separator();
             ImGui::TextDisabled("수동 조절 (자동 맞춤 결과가 여기에 반영됩니다)");
-            ImGui::SetNextItemWidth(150);
-            ImGui::SliderFloat("감도##calw", &s_sens, 0.5f, 2.0f, "%.1f");
+            sliderFloatPM("감도##calw", &s_sens, 0.5f, 2.0f, 0.1f, "%.1f", 150.0f);
             ImGui::SameLine();
-            ImGui::SetNextItemWidth(170);
-            ImGui::SliderFloat("오프셋##calw", &s_judgeOfsMs, -100.0f, 300.0f, "%.0fms");
+            sliderFloatPM("오프셋##calw", &s_judgeOfsMs, -100.0f, 300.0f, 1.0f, "%.0fms", 170.0f);
         }
         ImGui::End();
     }

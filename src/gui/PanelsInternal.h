@@ -15,12 +15,37 @@
 
 namespace midipro::audio { class BuiltinFx; } // 내장 이펙트 (audio/BuiltinFx.h)
 
+// ---- DPI 배율 일괄 적용 ----
+// 패널 코드의 SetNextItemWidth(130) 같은 고정 픽셀 폭 수백 곳이 150% 화면에서
+// 글자보다 좁아지는 것을 막는다. imgui.h 포함 "뒤"에 정의해야 선언은 안 건드린다.
+#define SetNextItemWidth(w) SetNextItemWidth((w) * midipro::gui::uiDpiScale())
+
 namespace midipro::gui {
+
+// 고정 크기(버튼 등)를 DPI 배율로 키운 ImVec2
+inline ImVec2 uiVec(float w, float h) { return ImVec2(w * uiDpiScale(), h * uiDpiScale()); }
+
+// 굵은 헤더 폰트 (App이 시작 시 지정). 제목/섹션 강조에 쓴다. null일 수 있다.
+void setUiHeaderFont(ImFont* f);
+ImFont* uiHeaderFont();
+// 섹션 제목: 굵은 헤더 폰트 + 강조색 밑줄. ImGui::SeparatorText의 꾸민 버전.
+void sectionHeader(const char* text);
 
 // 현재 칸(사용 가능 폭) 안에서 폭 w짜리 위젯이 가운데 오도록 커서를 옮긴다.
 void centerNextItem(float w);
 // 가운데 정렬 텍스트 (칸 폭 기준)
 void centeredText(const char* text);
+
+// 슬라이더 좌우에 [-]/[+] 버튼을 붙인 슬라이더. 버튼 한 번에 step만큼 조절해
+// 슬라이더로 맞추기 어려운 값을 정확히 넣을 수 있다(누르고 있으면 계속 증감).
+// width<=0이면 남은 폭에서 버튼을 뺀 만큼 슬라이더가 차지한다.
+// label은 "표시이름" 또는 "표시이름##id" 형식 (##뒤는 숨은 식별자).
+// startedEdit(옵션): 이 프레임에 "편집이 시작"됐으면 true (슬라이더를 막 잡았거나
+// +/- 버튼을 눌렀을 때). undo 스냅샷을 편집 시작 시 1회만 남기려는 호출부가 쓴다.
+bool sliderFloatPM(const char* label, float* v, float lo, float hi, float step,
+                   const char* fmt = "%.2f", float width = 0.0f, bool* startedEdit = nullptr);
+bool sliderIntPM(const char* label, int* v, int lo, int hi, int step,
+                 const char* fmt = "%d", float width = 0.0f, bool* startedEdit = nullptr);
 
 // 원형 노브: 세로 드래그로 vmin~vmax 조절, 더블클릭 = vdefault 리셋.
 bool rotaryKnob(const char* id, const char* label, float* value, float vmin, float vmax,
@@ -126,6 +151,10 @@ void duplicateSelectedClips(AppState& state);
 void rebuildAudioMix(AppState& state);
 // 재생 중 곡 편집을 재생 스냅샷에 반영
 void refreshPlaybackIfPlaying(AppState& state);
+
+// [+] 추가 버튼 + 악기/FX/내장 이펙트/프리즈 메뉴 (PanelsTrackView.cpp에 정의).
+// 트랙 뷰 FX 박스와 믹서·채널 FX 박스가 같은 메뉴를 쓴다.
+void drawFxAddButton(AppState& state, int trackIndex, bool withInstrument);
 
 // ---- 내장 이펙트 (PanelsMixer.cpp에 정의) ----
 // 체인 인덱스 fxIndex에 해당하는 트랙의 저장 항목(plugins)을 찾는다 (없으면 nullptr).

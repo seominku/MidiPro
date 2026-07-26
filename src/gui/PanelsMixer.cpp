@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstring> // strstr/memcpy (sliderPM 라벨 처리)
 #include <numeric>
 #include <string>
 #include <vector>
@@ -26,10 +27,115 @@ namespace midipro::gui {
 // ---------------------------------------------------------
 // (Panels.cpp의 익명 네임스페이스였던 위젯들 — 트랙 목록/트랙 뷰도 쓰므로 공개)
 
+// 굵은 헤더 폰트 (App이 setUiHeaderFont로 지정)
+static ImFont* g_uiHeaderFont = nullptr;
+void setUiHeaderFont(ImFont* f) { g_uiHeaderFont = f; }
+ImFont* uiHeaderFont() { return g_uiHeaderFont; }
+
+// 섹션 제목: 굵은 헤더 폰트로 크게 + 아래에 강조색 밑줄. 밋밋한 SeparatorText 대신.
+void sectionHeader(const char* text) {
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    if (g_uiHeaderFont) ImGui::PushFont(g_uiHeaderFont);
+    const ImVec2 p = ImGui::GetCursorScreenPos();
+    ImGui::TextUnformatted(text);
+    const ImVec2 sz = ImGui::GetItemRectSize();
+    if (g_uiHeaderFont) ImGui::PopFont();
+    // 글자 아래 강조색 밑줄 (칸 폭의 절반 정도, 글자보단 길게)
+    const float y = p.y + sz.y + 1.0f;
+    const float w = std::max(sz.x, 40.0f);
+    const ImU32 ac = ImGui::GetColorU32(ImGuiCol_SliderGrab);
+    dl->AddLine(ImVec2(p.x, y), ImVec2(p.x + w, y), ac, 2.0f);
+    ImGui::Dummy(ImVec2(0.0f, 3.0f)); // 밑줄 두께만큼 여백
+}
+
 // 현재 칸(사용 가능 폭) 안에서 폭 w짜리 위젯이 가운데 오도록 커서를 옮긴다.
 void centerNextItem(float w) {
     const float avail = ImGui::GetContentRegionAvail().x;
     if (avail > w) ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (avail - w) * 0.5f);
+}
+
+// label에서 화면에 보이는 부분("##" 앞)만 잘라 낸다.
+static const char* visibleLabel(const char* label) {
+    static thread_local char buf[128];
+    const char* hash = std::strstr(label, "##");
+    if (!hash) return label;
+    const std::size_t n = std::min((std::size_t)(hash - label), sizeof(buf) - 1);
+    std::memcpy(buf, label, n);
+    buf[n] = '\0';
+    return buf;
+}
+
+// [-] [슬라이더] [+] + (보이는 라벨). 버튼 한 번에 step, 누르고 있으면 반복.
+// 슬라이더로는 정밀 조절이 어려운 값을 한 눈금씩 정확히 맞추게 해 준다.
+// 슬라이더 폭 계산 (지정값 없으면 남은 폭에서 버튼 2개 + 라벨 몫을 뺀다)
+static float pmSliderWidth(const char* label, float width, float bh, float sp) {
+    if (width > 0.0f) return width;
+    const char* vis = visibleLabel(label);
+    const float labelW = (vis && vis[0]) ? ImGui::CalcTextSize(vis).x + sp : 0.0f;
+    const float sw = ImGui::GetContentRegionAvail().x - (bh + sp) * 2.0f - labelW;
+    return sw < 40.0f ? 40.0f : sw;
+}
+
+bool sliderFloatPM(const char* label, float* v, float lo, float hi, float step,
+                   const char* fmt, float width, bool* startedEdit) {
+    ImGui::PushID(label);
+    bool changed = false;
+    bool started = false;
+    const float bh = ImGui::GetFrameHeight(); // 정사각 버튼(프레임 높이)
+    const float sp = ImGui::GetStyle().ItemInnerSpacing.x;
+    const float sw = pmSliderWidth(label, width, bh, sp);
+
+    ImGui::PushButtonRepeat(true); // 누르고 있으면 계속 증감
+    if (ImGui::Button("-", ImVec2(bh, bh))) { *v -= step; changed = true; started = true; }
+    ImGui::SameLine(0.0f, sp);
+    // width 지정값(논리 px)만 DPI 배율을 곱한다. 자동 폭은 이미 물리 px라 그대로.
+    // (괄호로 감싸 SetNextItemWidth 매크로의 이중 스케일을 피한다)
+    (ImGui::SetNextItemWidth)(width > 0.0f ? sw * uiDpiScale() : sw);
+    if (ImGui::SliderFloat("##pmslider", v, lo, hi, fmt)) changed = true;
+    if (ImGui::IsItemActivated()) started = true; // 슬라이더를 막 잡음
+    ImGui::SameLine(0.0f, sp);
+    if (ImGui::Button("+", ImVec2(bh, bh))) { *v += step; changed = true; started = true; }
+    ImGui::PopButtonRepeat();
+
+    const char* vis = visibleLabel(label);
+    if (vis && vis[0]) {
+        ImGui::SameLine(0.0f, sp);
+        ImGui::TextUnformatted(vis);
+    }
+    ImGui::PopID();
+    if (changed) *v = std::clamp(*v, lo, hi); // 버튼 증감이 범위를 넘지 않게
+    if (startedEdit) *startedEdit = started;
+    return changed;
+}
+
+bool sliderIntPM(const char* label, int* v, int lo, int hi, int step, const char* fmt,
+                 float width, bool* startedEdit) {
+    ImGui::PushID(label);
+    bool changed = false;
+    bool started = false;
+    const float bh = ImGui::GetFrameHeight();
+    const float sp = ImGui::GetStyle().ItemInnerSpacing.x;
+    const float sw = pmSliderWidth(label, width, bh, sp);
+
+    ImGui::PushButtonRepeat(true);
+    if (ImGui::Button("-", ImVec2(bh, bh))) { *v -= step; changed = true; started = true; }
+    ImGui::SameLine(0.0f, sp);
+    (ImGui::SetNextItemWidth)(width > 0.0f ? sw * uiDpiScale() : sw); // 위 float판과 동일
+    if (ImGui::SliderInt("##pmslideri", v, lo, hi, fmt)) changed = true;
+    if (ImGui::IsItemActivated()) started = true;
+    ImGui::SameLine(0.0f, sp);
+    if (ImGui::Button("+", ImVec2(bh, bh))) { *v += step; changed = true; started = true; }
+    ImGui::PopButtonRepeat();
+
+    const char* vis = visibleLabel(label);
+    if (vis && vis[0]) {
+        ImGui::SameLine(0.0f, sp);
+        ImGui::TextUnformatted(vis);
+    }
+    ImGui::PopID();
+    if (changed) *v = std::clamp(*v, lo, hi);
+    if (startedEdit) *startedEdit = started;
+    return changed;
 }
 
 // 원형 노브: 세로 드래그로 vmin~vmax 조절, 더블클릭 = vdefault 리셋.
@@ -115,7 +221,22 @@ float peakToNorm(float peak) {
     return std::clamp((db + 60.0f) / 60.0f, 0.0f, 1.0f);
 }
 
-// 세로 미터 한 줄: 채움(초록/노랑/빨강) + 피크 홀드 라인. raw = 이번 프레임 피크.
+// 레벨(0~1)에 해당하는 미터 색: 초록→호박→빨강으로 부드럽게 간다.
+static ImU32 meterColorAt(float t) {
+    t = t < 0.0f ? 0.0f : (t > 1.0f ? 1.0f : t);
+    // 0.0 초록(70,200,90) → 0.82 호박(230,190,70) → 1.0 빨강(240,70,60)
+    float r, g, b;
+    if (t < 0.82f) {
+        const float u = t / 0.82f;
+        r = 70 + (230 - 70) * u; g = 200 + (190 - 200) * u; b = 90 + (70 - 90) * u;
+    } else {
+        const float u = (t - 0.82f) / 0.18f;
+        r = 230 + (240 - 230) * u; g = 190 + (70 - 190) * u; b = 70 + (60 - 70) * u;
+    }
+    return IM_COL32((int)r, (int)g, (int)b, 255);
+}
+
+// 세로 미터 한 줄: 부드러운 그라데이션 채움 + 피크 홀드 라인. raw = 이번 프레임 피크.
 void drawMeterBar(ImDrawList* dl, const ImVec2& p0, const ImVec2& p1,
                   AppState::MeterView& m, float raw, float dt, double now) {
     const float h = p1.y - p0.y;
@@ -127,24 +248,30 @@ void drawMeterBar(ImDrawList* dl, const ImVec2& p0, const ImVec2& p1,
     }
     if (raw >= 1.0f) m.clip = true;
 
-    dl->AddRectFilled(p0, p1, IM_COL32(22, 22, 27, 255), 2.0f);
-    // 채움을 dB 구간별 색으로: ~-12dB 초록, -12~-3 노랑, -3~0 빨강
-    struct Seg { float lo, hi; ImU32 col; };
-    const Seg segs[3] = {{0.00f, 0.80f, IM_COL32(70, 200, 90, 255)},
-                         {0.80f, 0.95f, IM_COL32(235, 200, 70, 255)},
-                         {0.95f, 1.00f, IM_COL32(240, 80, 70, 255)}};
-    for (const Seg& s : segs) {
-        const float hi = std::min(m.disp, s.hi);
-        if (hi <= s.lo) break;
-        dl->AddRectFilled(ImVec2(p0.x, p1.y - hi * h), ImVec2(p1.x, p1.y - s.lo * h), s.col);
-    }
-    // -12dB/-3dB 경계 눈금 (색 구간과 같은 위치라 읽기 기준이 된다)
+    dl->AddRectFilled(p0, p1, IM_COL32(20, 20, 25, 255), 2.0f);
+    // 스케일에 고정된 초록→호박→빨강 그라데이션을 두 띠로 그려 채움 높이만큼만 보인다.
+    // (색이 레벨 눈금과 항상 같은 위치라 읽기 기준이 유지된다)
+    const float disp = std::clamp(m.disp, 0.0f, 1.0f);
+    auto band = [&](float lo, float hi) {
+        const float top = std::min(disp, hi);
+        if (top <= lo) return;
+        const float yTop = p1.y - top * h, yBot = p1.y - lo * h;
+        dl->AddRectFilledMultiColor(ImVec2(p0.x, yTop), ImVec2(p1.x, yBot),
+                                    meterColorAt(top), meterColorAt(top),
+                                    meterColorAt(lo), meterColorAt(lo));
+    };
+    band(0.0f, 0.82f);
+    band(0.82f, 1.0f);
+    // -12dB/-3dB 경계 눈금
     for (float g : {0.80f, 0.95f})
         dl->AddLine(ImVec2(p0.x, p1.y - g * h), ImVec2(p1.x, p1.y - g * h),
                     IM_COL32(0, 0, 0, 90), 1.0f);
     if (m.hold > 0.001f) {
         const float y = p1.y - m.hold * h;
-        dl->AddLine(ImVec2(p0.x, y), ImVec2(p1.x, y), IM_COL32(255, 255, 255, 210), 1.5f);
+        // 피크 홀드: 흰 선 + 그 색의 옅은 글로우로 살짝 반짝이게
+        dl->AddRectFilled(ImVec2(p0.x, y - 1.0f), ImVec2(p1.x, y + 1.0f),
+                          (meterColorAt(m.hold) & 0x00FFFFFF) | 0x66000000);
+        dl->AddLine(ImVec2(p0.x, y), ImVec2(p1.x, y), IM_COL32(255, 255, 255, 220), 1.5f);
     }
 }
 
@@ -190,7 +317,7 @@ void miniMeterH(const char* id, AppState::MeterView& m, float raw, float w, floa
 // 레벨 미터 위젯: 위 클립 램프(빨강 래치, 클릭으로 해제) + 세로 바 bars개(L/R 또는 모노).
 void levelMeterWidget(const char* id, AppState::MeterView* views, const float* raws, int bars,
                       float w, float h) {
-    constexpr float kLampH = 7.0f;
+    const float kLampH = 7.0f * uiDpiScale();
     const ImVec2 pos = ImGui::GetCursorScreenPos();
     ImGui::InvisibleButton(id, ImVec2(w, h));
     const bool clicked = ImGui::IsItemClicked();
@@ -218,17 +345,120 @@ void levelMeterWidget(const char* id, AppState::MeterView* views, const float* r
 
 
 
+// FX 체인 박스 (믹서 스트립 · 채널 창 공용).
+// 맨 위에 트랙 악기(VSTi) 줄을 보여준다 — 예전엔 이펙트만 보여줘서 Surge XT
+// 같은 악기를 넣으면 "믹서에 안 보인다"는 혼란이 있었다.
+// 이펙트 줄은 드래그로 순서를 바꾼다 (엔진 체인 + 저장 목록 동시 이동).
+static void drawFxChainBox(AppState& state, seq::Track& t, int trackIndex, float height) {
+    ImGui::BeginChild("##fxbox", ImVec2(0.0f, height), ImGuiChildFlags_Borders);
+    const int fxCh = t.channel & 0x0F;
+
+    // [+] : 트랙 뷰와 같은 추가 메뉴 (악기/FX/내장 이펙트/프리즈)
+    drawFxAddButton(state, trackIndex, /*withInstrument=*/true);
+
+    // ── 악기 줄 ([+] 옆) ──
+    if (state.vst->trackInstrumentActive(fxCh)) {
+        ImGui::SameLine();
+        const std::string inm = state.vst->trackInstrumentName(fxCh);
+        ImGui::TextColored(ImVec4(0.75f, 0.6f, 1.0f, 1.0f), "[i] %s", inm.c_str());
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("트랙 악기: %s\n더블클릭: 편집기 열기", inm.c_str());
+        if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+            if (auto* h = state.vst->trackInstrumentHost(fxCh)) h->openEditor();
+        }
+    }
+
+    const int nfx = state.vst->trackEffectCount(fxCh);
+    if (nfx == 0 && !state.vst->trackInstrumentActive(fxCh)) {
+        centerNextItem(ImGui::CalcTextSize("(없음)").x);
+        ImGui::TextDisabled("(없음)");
+    }
+    // 저장 목록(t.plugins)엔 악기 항목이 섞여 있어 이펙트만 세어 찾는다
+    const auto fxPlugIdx = [&t](int wantFx) {
+        int k = 0;
+        for (int idx = 0; idx < (int)t.plugins.size(); ++idx) {
+            if (t.plugins[(std::size_t)idx].isInstrument) continue;
+            if (k == wantFx) return idx;
+            ++k;
+        }
+        return -1;
+    };
+    // 인접 스왑: 엔진 체인 + 저장 목록을 같은 순서로 유지
+    const auto swapFx = [&](int a, int b) {
+        const int pa = fxPlugIdx(a), pb = fxPlugIdx(b);
+        state.vst->moveTrackEffect(fxCh, a, b);
+        if (pa >= 0 && pb >= 0)
+            std::swap(t.plugins[(std::size_t)pa], t.plugins[(std::size_t)pb]);
+    };
+    // 임의 위치 이동 = 인접 스왑의 연쇄 (저장 목록과 어긋나지 않게)
+    const auto moveFxTo = [&](int from, int to) {
+        while (from < to) { swapFx(from, from + 1); ++from; }
+        while (from > to) { swapFx(from, from - 1); --from; }
+    };
+    int dragFrom = -1, dragTo = -1; // 루프 밖에서 실제 이동
+    for (int fi = 0; fi < nfx; ++fi) {
+        ImGui::PushID(300 + fi);
+        bool fon = state.vst->trackEffectEnabled(fxCh, fi);
+        if (ImGui::Checkbox("##mxfxon", &fon)) { // 실시간 바이패스
+            state.vst->setTrackEffectEnabled(fxCh, fi, fon);
+            const int pidx = fxPlugIdx(fi);
+            if (pidx >= 0) t.plugins[(std::size_t)pidx].enabled = fon;
+        }
+        ImGui::SameLine(0.0f, 4.0f);
+        // 이름 줄 = 드래그 손잡이. 잡아서 다른 줄 위에 놓으면 그 자리로 이동.
+        const std::string nm = state.vst->trackEffectName(fxCh, fi);
+        ImGui::PushStyleColor(ImGuiCol_Text, fon ? ImVec4(1.0f, 0.78f, 0.45f, 1.0f)
+                                                 : ImVec4(0.5f, 0.5f, 0.5f, 1.0f));
+        ImGui::Selectable(nm.c_str(), false, ImGuiSelectableFlags_AllowDoubleClick);
+        ImGui::PopStyleColor();
+        if (ImGui::BeginDragDropSource()) {
+            // 채널을 함께 담아, 다른 트랙 스트립에 떨어뜨려도 엉뚱한 체인이
+            // 움직이지 않게 한다 (같은 채널 안에서만 이동 허용)
+            const int payload[2] = {fxCh, fi};
+            ImGui::SetDragDropPayload("MIXER_FX_ROW", payload, sizeof(payload));
+            ImGui::Text("%s ↕ 이동", nm.c_str());
+            ImGui::EndDragDropSource();
+        }
+        if (ImGui::BeginDragDropTarget()) {
+            if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("MIXER_FX_ROW")) {
+                const int* d = (const int*)p->Data;
+                if (d[0] == fxCh) { // 같은 채널일 때만
+                    dragFrom = d[1];
+                    dragTo = fi;
+                }
+            }
+            ImGui::EndDragDropTarget();
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s\n드래그: 순서 이동 · 더블클릭: 편집기 열기", nm.c_str());
+        if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+            if (auto* h = state.vst->trackEffectHost(fxCh, fi)) h->openEditor();
+            else if (state.vst->trackEffectBuiltin(fxCh, fi)) {
+                state.builtinFxCh = fxCh; // 내장 이펙트: 파라미터 창
+                state.builtinFxIdx = fi;
+            }
+        }
+        ImGui::PopID();
+    }
+    if (dragFrom >= 0 && dragTo >= 0 && dragFrom != dragTo) {
+        state.snapshot(); // 순서 변경도 되돌리기 가능
+        moveFxTo(dragFrom, dragTo);
+    }
+    ImGui::EndChild();
+}
+
 void drawMixer(AppState& state) {
     if (!state.showMixer) return;
-    ImGui::SetNextWindowSize(ImVec2(640, 640), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(uiVec(720, 700), ImGuiCond_FirstUseEver);
     ImGui::Begin("믹서", &state.showMixer);
     drawPendingWindowBackground(); // 창별 배경 이미지 (예약이 있으면)
 
     // 마스터(왼쪽 고정) + 모든 트랙 스트립을 나란히. 많으면 가로 스크롤.
-    constexpr float kColW = 112.0f;
-    constexpr float kFaderH = 210.0f;
-    constexpr float kFaderW = 28.0f;
-    constexpr float kKnobR = 19.0f;
+    const float S = uiDpiScale();
+    const float kColW = 132.0f * S;   // 폭을 키워 FX 이름이 보이게 (요청 반영)
+    const float kFaderH = 230.0f * S; // 채널 창과 같은 높이로 통일
+    const float kFaderW = 30.0f * S;
+    const float kKnobR = 19.0f * S;
     // 연습 트랙은 '기타 연습' 창 전용 — 믹서에는 곡 트랙만 스트립을 낸다
     std::vector<int> mixIdx;
     for (int i = 0; i < (int)state.song.tracks.size(); ++i)
@@ -248,12 +478,13 @@ void drawMixer(AppState& state) {
 
         // 원시 피크는 applyTransportState가 프레임당 한 번 걷어둔 캐시를 읽는다
         float masterRaw[2] = {state.masterPeakCache[0], state.masterPeakCache[1]};
-        constexpr float kMeterGap = 6.0f;
-        constexpr float kMeterW2 = 16.0f; // 스테레오(L/R 2줄)
-        constexpr float kMeterW1 = 9.0f;  // 모노(버스 합산 피크)
+        const float kMeterGap = 6.0f * S;
+        const float kMeterW2 = 16.0f * S; // 스테레오(L/R 2줄)
+        const float kMeterW1 = 9.0f * S;  // 모노(버스 합산 피크)
 
         // ── 왼쪽: 마스터 (페이더 + 미터 + % + Pan/Gain 노브) ──
         ImGui::TableSetColumnIndex(0);
+        ImGui::TextUnformatted(" "); // 트랙 열의 배지 줄만큼 내려 페이더 높이를 맞춘다
         centeredText("마스터");
         ImGui::Spacing();
         centerNextItem(kFaderW + kMeterGap + kMeterW2);
@@ -321,7 +552,7 @@ void drawMixer(AppState& state) {
             rotaryKnob("##tsend", "Send", &t.sendLevel, 0.0f, 1.0f, 0.0f, kKnobR);
             snapshotKnobEdit(state, t.sendLevel, prevT);
             ImGui::Spacing();
-            centerNextItem(52.0f);
+            centerNextItem(52.0f * S);
             bool mm = t.muted;
             if (ImGui::Checkbox("뮤트##mx", &mm)) {
                 state.snapshot(); // 토글 "전" 상태를 남긴다
@@ -332,78 +563,11 @@ void drawMixer(AppState& state) {
             ImGui::Separator();
             drawTrackEqInline(state, t);
 
-            // ── FX 체인 (엔진 처리 순서 위→아래, ▲▼로 순서 변경) ──
+            // ── FX 체인 (악기 줄 + 이펙트 목록, 드래그로 순서 변경) ──
             if (state.vst) {
                 ImGui::Separator();
                 centeredText("FX 체인");
-                ImGui::BeginChild("##fxbox", ImVec2(0.0f, 110.0f), ImGuiChildFlags_Borders);
-                const int fxCh = t.channel & 0x0F;
-                const int nfx = state.vst->trackEffectCount(fxCh);
-                if (nfx == 0) {
-                    centerNextItem(ImGui::CalcTextSize("(없음)").x);
-                    ImGui::TextDisabled("(없음)");
-                }
-                // 저장 목록(t.plugins)엔 악기 항목이 섞여 있어 이펙트만 세어 찾는다
-                const auto fxPlugIdx = [&t](int wantFx) {
-                    int k = 0;
-                    for (int idx = 0; idx < (int)t.plugins.size(); ++idx) {
-                        if (t.plugins[(std::size_t)idx].isInstrument) continue;
-                        if (k == wantFx) return idx;
-                        ++k;
-                    }
-                    return -1;
-                };
-                // 인접 스왑: 엔진 체인 + 저장 목록을 같은 순서로 유지
-                const auto swapFx = [&](int a, int b) {
-                    const int pa = fxPlugIdx(a), pb = fxPlugIdx(b);
-                    state.vst->moveTrackEffect(fxCh, a, b);
-                    if (pa >= 0 && pb >= 0)
-                        std::swap(t.plugins[(std::size_t)pa], t.plugins[(std::size_t)pb]);
-                };
-                for (int fi = 0; fi < nfx; ++fi) {
-                    ImGui::PushID(300 + fi);
-                    bool fon = state.vst->trackEffectEnabled(fxCh, fi);
-                    if (ImGui::Checkbox("##mxfxon", &fon)) { // 실시간 바이패스
-                        state.vst->setTrackEffectEnabled(fxCh, fi, fon);
-                        const int pidx = fxPlugIdx(fi);
-                        if (pidx >= 0) t.plugins[(std::size_t)pidx].enabled = fon;
-                    }
-                    ImGui::SameLine(0.0f, 3.0f);
-                    ImGui::BeginDisabled(fi == 0);
-                    if (ImGui::SmallButton("▲")) {
-                        swapFx(fi, fi - 1);
-                        ImGui::EndDisabled();
-                        ImGui::PopID();
-                        break; // 순서가 바뀌었으니 이번 프레임 목록은 여기까지
-                    }
-                    ImGui::EndDisabled();
-                    ImGui::SameLine(0.0f, 3.0f);
-                    ImGui::BeginDisabled(fi == nfx - 1);
-                    if (ImGui::SmallButton("▼")) {
-                        swapFx(fi, fi + 1);
-                        ImGui::EndDisabled();
-                        ImGui::PopID();
-                        break;
-                    }
-                    ImGui::EndDisabled();
-                    ImGui::SameLine(0.0f, 4.0f);
-                    const std::string nm = state.vst->trackEffectName(fxCh, fi);
-                    ImGui::TextColored(fon ? ImVec4(1.0f, 0.78f, 0.45f, 1.0f)
-                                           : ImVec4(0.5f, 0.5f, 0.5f, 1.0f),
-                                       "%s", nm.c_str());
-                    if (ImGui::IsItemHovered())
-                        ImGui::SetTooltip("%s\n더블클릭: 편집기/파라미터 열기", nm.c_str());
-                    if (ImGui::IsItemHovered() &&
-                        ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
-                        if (auto* h = state.vst->trackEffectHost(fxCh, fi)) h->openEditor();
-                        else if (state.vst->trackEffectBuiltin(fxCh, fi)) {
-                            state.builtinFxCh = fxCh; // 내장 이펙트: 파라미터 창
-                            state.builtinFxIdx = fi;
-                        }
-                    }
-                    ImGui::PopID();
-                }
-                ImGui::EndChild();
+                drawFxChainBox(state, t, ti2, 150.0f * S);
             }
             ImGui::PopID();
         }
@@ -484,7 +648,7 @@ void drawTrackEqInline(AppState& state, seq::Track& t) {
     audio::BuiltinFx* eq = findTrackEq(state, ch, eqIdx);
     centeredText("EQ");
     if (!eq) {
-        centerNextItem(56.0f);
+        centerNextItem(56.0f * uiDpiScale());
         if (ImGui::SmallButton("+ EQ")) addTrackEq(state, t);
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("기본 3밴드 EQ를 FX 체인에 추가");
         return;
@@ -520,7 +684,7 @@ void drawReturnReverbControls(AppState& state) {
         state.audioClips->setReturnLevel(lvl);
     audio::BuiltinFx* rv = state.audioClips->returnReverb();
     if (!rv) return;
-    centerNextItem(44.0f);
+    centerNextItem(44.0f * uiDpiScale());
     if (ImGui::SmallButton("설정##ret")) ImGui::OpenPopup("retset");
     if (ImGui::BeginPopup("retset")) {
         static const char* kNames[2] = {"공간 크기", "댐핑"};
@@ -583,7 +747,7 @@ void drawBuiltinFx(AppState& state) {
     char title[96];
     std::snprintf(title, sizeof(title), "%s — 트랙 %d 이펙트###builtinfx",
                   audio::BuiltinFx::typeName(fx->type()), state.builtinFxCh + 1);
-    ImGui::SetNextWindowSize(ImVec2(320, 0), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(uiVec(340, 0), ImGuiCond_FirstUseEver);
     ImGui::Begin(title, &open);
     drawPendingWindowBackground(); // 창별 배경 이미지 (예약이 있으면)
     const audio::BuiltinFx::ParamDesc* pd = audio::BuiltinFx::paramDescs(fx->type());
@@ -656,22 +820,23 @@ void drawMixerCompact(AppState& state) {
     // 세션마다 처음엔 믹서 창과 같은 도크(탭)에 붙인다. 이후 옮기면 그대로.
     if (ImGuiWindow* mx = ImGui::FindWindowByName("믹서"))
         if (mx->DockId != 0) ImGui::SetNextWindowDockID(mx->DockId, ImGuiCond_Once);
-    ImGui::SetNextWindowPos(ImVec2(10.0f, 60.0f), ImGuiCond_FirstUseEver); // 왼쪽에 배치
-    ImGui::SetNextWindowSize(ImVec2(270, 620), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowPos(uiVec(10, 60), ImGuiCond_FirstUseEver); // 왼쪽에 배치
+    ImGui::SetNextWindowSize(uiVec(330, 660), ImGuiCond_FirstUseEver);
     ImGui::Begin("채널 (마스터/선택 트랙)", &state.showMixerCompact);
     drawPendingWindowBackground(); // 창별 배경 이미지 (예약이 있으면)
 
-    constexpr float kColW = 112.0f;
-    constexpr float kFaderH = 230.0f;
-    constexpr float kFaderW = 28.0f;
-    constexpr float kKnobR = 19.0f;
-    constexpr float kMeterGap = 6.0f;
-    constexpr float kMeterW2 = 16.0f;
-    constexpr float kMeterW1 = 9.0f;
+    const float S = uiDpiScale();
+    const float kColW = 132.0f * S;   // 믹서와 같은 폭 (전체적으로 키움)
+    const float kFaderH = 230.0f * S;
+    const float kFaderW = 30.0f * S;
+    const float kKnobR = 19.0f * S;
+    const float kMeterGap = 6.0f * S;
+    const float kMeterW2 = 16.0f * S;
+    const float kMeterW1 = 9.0f * S;
 
     if (ImGui::BeginTable("mixerc_cols", 2,
                           ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_SizingFixedFit,
-                          ImVec2(kColW * 2.0f + 24.0f, 0))) {
+                          ImVec2(kColW * 2.0f + 24.0f * S, 0))) {
         ImGui::TableSetupColumn("m", ImGuiTableColumnFlags_WidthFixed, kColW);
         ImGui::TableSetupColumn("t", ImGuiTableColumnFlags_WidthFixed, kColW);
         ImGui::TableNextRow();
@@ -743,7 +908,7 @@ void drawMixerCompact(AppState& state) {
             rotaryKnob("##ctsend", "Send", &t.sendLevel, 0.0f, 1.0f, 0.0f, kKnobR);
             snapshotKnobEdit(state, t.sendLevel, prevT);
             ImGui::Spacing();
-            centerNextItem(52.0f);
+            centerNextItem(52.0f * S);
             bool mm = t.muted;
             if (ImGui::Checkbox("뮤트##cmx", &mm)) {
                 state.snapshot();
@@ -754,12 +919,19 @@ void drawMixerCompact(AppState& state) {
             ImGui::Separator();
             drawTrackEqInline(state, t);
 
+            // ── FX 체인 (악기 + 이펙트 — 믹서 스트립과 같은 박스) ──
+            if (state.vst) {
+                ImGui::Separator();
+                centeredText("FX 체인");
+                drawFxChainBox(state, t, state.selectedTrack, 120.0f * S);
+            }
+
             // ── 구간 마커 리스트 ──
             // 클릭하면 재생 위치를 그 마커로 옮기고, 트랙 뷰/피아노 롤이
             // 따라 스크롤한다 (seekTo의 scrollToPlayhead).
             ImGui::Separator();
             ImGui::TextDisabled("마커");
-            if (ImGui::BeginChild("##cmarkers", ImVec2(kColW - 4.0f, 150.0f),
+            if (ImGui::BeginChild("##cmarkers", ImVec2(kColW - 4.0f, 150.0f * S),
                                   ImGuiChildFlags_Borders)) {
                 if (state.song.markers.empty()) {
                     ImGui::TextDisabled("(없음)");

@@ -24,6 +24,18 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     // 죽으면 우리도 같이 죽는다 — 그때 아무 흔적 없이 사라지지 않게 한다.
     midipro::core::installCrashHandler();
 
+    // DPI 인식 (창을 만들기 전에!). 없으면 150% 화면에서 2560px로 렌더한 걸
+    // Windows가 1.5배 늘려 보여줘 전체가 흐릿해진다. 퍼모니터 V2가 안 되는
+    // 옛 Windows 10에서는 시스템 인식으로라도 내려간다.
+    {
+        using SetCtxFn = BOOL(WINAPI*)(DPI_AWARENESS_CONTEXT);
+        HMODULE user32 = GetModuleHandleW(L"user32.dll");
+        auto setCtx = user32 ? (SetCtxFn)(void*)GetProcAddress(user32, "SetProcessDpiAwarenessContext")
+                             : nullptr;
+        if (!setCtx || !setCtx(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2))
+            SetProcessDPIAware();
+    }
+
     // 설치 프로그램이 "지금 켜져 있다"를 알아보는 표식.
     // 이름은 installer\MidiPro.iss의 AppMutexName과 같아야 한다. 실행 중에
     // 업데이트를 하면 설치 프로그램이 이걸 보고 종료를 먼저 요청한다.

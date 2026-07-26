@@ -26,6 +26,9 @@ namespace midipro::gui {
 // 박스가 줌 핸들러보다 늦게 그려져서 한 프레임 지연 판정이 필요하다.
 static bool g_fxBoxHoveredNow = false;
 
+// 트랙 뷰 왼쪽 헤더 열 폭 (요청으로 210→260 확대, DPI 배율 포함)
+static float kTrackHdrW() { return 260.0f * uiDpiScale(); }
+
 // 스냅 격자 한 칸의 틱 수 (트랙 뷰 눈금·스냅 공용). 박자표(tpb)를 나눠 쓴다.
 static uint32_t trackSnapTicks(const AppState& state, uint32_t tpb) {
     const uint32_t beat = std::max<uint32_t>(1, (uint32_t)state.song.ppqn);
@@ -53,30 +56,13 @@ static uint32_t applyTrackSnap(const AppState& state, uint32_t tpb, long tick) {
 
 // 박스 안: [+] 메뉴 + 악기 1줄 + 이펙트 줄들 (더블클릭=편집기, 우클릭=메뉴).
 // withInstrument=false면 이펙트만 다룬다 (연습 창: 기타 톤용 FX 체인).
-void drawTrackFxChain(AppState& state, int trackIndex, float boxW, float boxH,
-                      bool withInstrument) {
-    if (!state.vst || trackIndex < 0 || trackIndex >= (int)state.song.tracks.size())
-        return;
+// [+] 추가 버튼 + 악기/FX/내장 이펙트/프리즈 메뉴.
+// 트랙 뷰 FX 박스와 믹서·채널 FX 박스(drawFxChainBox)가 같은 메뉴를 공유한다.
+void drawFxAddButton(AppState& state, int trackIndex, bool withInstrument) {
+    if (!state.vst || trackIndex < 0 || trackIndex >= (int)state.song.tracks.size()) return;
     auto& track = state.song.tracks[(std::size_t)trackIndex];
     const int i = trackIndex;
     const int ch = track.channel & 0x0F;
-    // 저장 목록(track.plugins)엔 악기 항목이 섞여 있어, 체인의 fi번째
-    // 이펙트가 목록의 몇 번째인지 이펙트만 세어 찾는다.
-    const auto fxPluginIndex = [&track](int wantFx) {
-        int k = 0;
-        for (int idx = 0; idx < (int)track.plugins.size(); ++idx) {
-            if (track.plugins[(std::size_t)idx].isInstrument) continue;
-            if (k == wantFx) return idx;
-            ++k;
-        }
-        return -1;
-    };
-
-    ImGui::PushID(trackIndex);
-    ImGui::BeginChild("fxbox", ImVec2(boxW, boxH), true);
-    // FX 박스 위에서는 휠이 "박스 스크롤"이어야 한다 — 확대/축소 핸들러가
-    // 건너뛰도록 호버를 알린다 (다음 프레임 판정용)
-    if (ImGui::IsWindowHovered()) g_fxBoxHoveredNow = true;
     // [+] : 악기/FX/프리즈 선택 메뉴
     if (ImGui::SmallButton("+")) {
         // 연습 트랙은 MIDI 쪽 선택을 건드리지 않는다 (트랙 뷰에 없는 트랙이다)
@@ -190,6 +176,33 @@ void drawTrackFxChain(AppState& state, int trackIndex, float boxW, float boxH,
         ImGui::EndPopup();
     }
 
+}
+void drawTrackFxChain(AppState& state, int trackIndex, float boxW, float boxH,
+                      bool withInstrument) {
+    if (!state.vst || trackIndex < 0 || trackIndex >= (int)state.song.tracks.size())
+        return;
+    auto& track = state.song.tracks[(std::size_t)trackIndex];
+    const int i = trackIndex;
+    const int ch = track.channel & 0x0F;
+    // 저장 목록(track.plugins)엔 악기 항목이 섞여 있어, 체인의 fi번째
+    // 이펙트가 목록의 몇 번째인지 이펙트만 세어 찾는다.
+    const auto fxPluginIndex = [&track](int wantFx) {
+        int k = 0;
+        for (int idx = 0; idx < (int)track.plugins.size(); ++idx) {
+            if (track.plugins[(std::size_t)idx].isInstrument) continue;
+            if (k == wantFx) return idx;
+            ++k;
+        }
+        return -1;
+    };
+
+    ImGui::PushID(trackIndex);
+    ImGui::BeginChild("fxbox", ImVec2(boxW, boxH), true);
+    // FX 박스 위에서는 휠이 "박스 스크롤"이어야 한다 — 확대/축소 핸들러가
+    // 건너뛰도록 호버를 알린다 (다음 프레임 판정용)
+    if (ImGui::IsWindowHovered()) g_fxBoxHoveredNow = true;
+    drawFxAddButton(state, trackIndex, withInstrument);
+
     // 악기 줄 ([+] 옆)
     if (withInstrument) {
         ImGui::SameLine();
@@ -280,7 +293,7 @@ void drawTrackList(AppState& state) {
     if (ImGui::BeginPopup("addtrackmenu")) {
         if (ImGui::MenuItem("일반 트랙")) addTrack(state);
         if (ImGui::MenuItem("드럼 트랙")) addDrumTrack(state); // 채널 10 + 에디터 열기
-        if (ImGui::MenuItem("기타 트랙")) addGuitarTrack(state); // + 타브 악보 창
+        if (ImGui::MenuItem("기타 연습 트랙")) addGuitarTrack(state); // + 타브 악보 창
         ImGui::EndPopup();
     }
     ImGui::SameLine();
@@ -387,7 +400,7 @@ void drawTrackView(AppState& state) {
     if (ImGui::BeginPopup("addtrackmenu_tv")) {
         if (ImGui::MenuItem("일반 트랙")) addTrack(state);
         if (ImGui::MenuItem("드럼 트랙")) addDrumTrack(state); // 채널 10 + 에디터 열기
-        if (ImGui::MenuItem("기타 트랙")) addGuitarTrack(state); // + 타브 악보 창
+        if (ImGui::MenuItem("기타 연습 트랙")) addGuitarTrack(state); // + 타브 악보 창
         ImGui::EndPopup();
     }
     ImGui::SameLine();
@@ -461,7 +474,7 @@ void drawTrackView(AppState& state) {
     const uint32_t songLen = state.timelineBars * tpb; // 공용 타임라인 마디 수
     const float timelineW = songLen * zoom + 40.0f;
     // 헤더(이름/컨트롤/FX 박스)가 들어갈 만큼 확보. 레인 그림도 같은 높이를 쓴다.
-    const float laneH = 100.0f;
+    const float laneH = 100.0f * uiDpiScale();
 
     // ── 곡 미니맵: 곡 전체를 축소한 띠. 클릭/드래그로 뷰가 그 위치로 이동한다 ──
     {
@@ -530,7 +543,7 @@ void drawTrackView(AppState& state) {
     ImGuiTableFlags flags = ImGuiTableFlags_ScrollX | ImGuiTableFlags_ScrollY |
                             ImGuiTableFlags_BordersInner;
     if (ImGui::BeginTable("trackview", 2, flags)) {
-        ImGui::TableSetupColumn("트랙", ImGuiTableColumnFlags_WidthFixed, 210.0f);
+        ImGui::TableSetupColumn("트랙", ImGuiTableColumnFlags_WidthFixed, kTrackHdrW());
         ImGui::TableSetupColumn("타임라인", ImGuiTableColumnFlags_WidthFixed, timelineW);
         ImGui::TableSetupScrollFreeze(1, 0); // 헤더 열 고정
 
@@ -571,7 +584,9 @@ void drawTrackView(AppState& state) {
             // 볼륨/미터는 이름 줄 높이부터 박스 바닥까지 헤더 전체를 세로로 쓴다.
             ImGui::TableSetColumnIndex(0);
             const ImVec2 hp0 = ImGui::GetCursorScreenPos();
-            constexpr float kVolW = 16.0f, kMeterHdrW = 11.0f, kGap = 4.0f, kBoxH = 52.0f;
+            const float S2 = uiDpiScale(); // 헤더 안 고정 크기도 DPI 배율
+            const float kVolW = 16.0f * S2, kMeterHdrW = 11.0f * S2, kGap = 4.0f * S2,
+                        kBoxH = 56.0f * S2; // FX 박스도 살짝 키움
             const float leftW =
                 ImGui::GetContentRegionAvail().x - (kVolW + kMeterHdrW + kGap * 2.0f);
             const float headerH = ImGui::GetFrameHeight() * 2.0f +
@@ -618,7 +633,8 @@ void drawTrackView(AppState& state) {
             trackTypeBadge(track); // [드럼]/[기타] 유형 표시
             char nbuf[64];
             std::snprintf(nbuf, sizeof(nbuf), "%s", track.name.c_str());
-            ImGui::SetNextItemWidth(
+            // 물리 좌표에서 직접 계산한 폭 — DPI 매크로를 우회한다(이중 스케일 방지)
+            (ImGui::SetNextItemWidth)(
                 std::max(50.0f, hp0.x + leftW - ImGui::GetCursorScreenPos().x));
             if (ImGui::InputText("##name", nbuf, sizeof(nbuf))) track.name = nbuf;
             // ── 컨트롤 줄: 녹음 | ASIO | 입력 (컴팩트) ──
@@ -1462,14 +1478,14 @@ void drawTrackView(AppState& state) {
                         // 페이드: 슬라이더로 즉시 반영 (재생 중에도 다음 프레임에 적용)
                         float fi = (float)cclip.fadeInSec;
                         float fo = (float)cclip.fadeOutSec;
-                        ImGui::SetNextItemWidth(160);
-                        const bool fiChg = ImGui::SliderFloat("페이드 인 (초)", &fi, 0.0f, 3.0f, "%.2f");
-                        if (ImGui::IsItemActivated()) state.snapshot(); // 편집 시작 시 1회
+                        bool fiEdit = false, foEdit = false;
+                        const bool fiChg = sliderFloatPM("페이드 인 (초)", &fi, 0.0f, 3.0f, 0.05f,
+                                                         "%.2f", 160.0f, &fiEdit);
+                        if (fiEdit) state.snapshot(); // 편집 시작(슬라이더 잡기/버튼) 시 1회
                         if (fiChg) cclip.fadeInSec = fi;
-                        ImGui::SetNextItemWidth(160);
-                        const bool foChg =
-                            ImGui::SliderFloat("페이드 아웃 (초)", &fo, 0.0f, 3.0f, "%.2f");
-                        if (ImGui::IsItemActivated()) state.snapshot();
+                        const bool foChg = sliderFloatPM("페이드 아웃 (초)", &fo, 0.0f, 3.0f, 0.05f,
+                                                         "%.2f", 160.0f, &foEdit);
+                        if (foEdit) state.snapshot();
                         if (foChg) cclip.fadeOutSec = fo;
                         ImGui::Separator();
                         // 클립 게인: 트랙 볼륨과 별개로 이 클립만 키우거나 줄인다.
@@ -2132,7 +2148,7 @@ void drawTrackView(AppState& state) {
                                       std::max(0.0f, inner->Scroll.y + state.tvScrollYDelta));
                     state.tvScrollYDelta = 0.0f;
                 }
-                state.tvVisibleW = std::max(0.0f, inner->Size.x - 210.0f); // 헤더 열 제외
+                state.tvVisibleW = std::max(0.0f, inner->Size.x - kTrackHdrW()); // 헤더 열 제외
             }
         ImGui::EndTable();
     }
@@ -2145,14 +2161,26 @@ void drawTrackView(AppState& state) {
     }
 
     if (state.song.tracks.empty())
-        ImGui::TextDisabled("트랙이 없습니다. '+ 트랙'을 누르세요.");
+        ImGui::TextDisabled("트랙이 없습니다. '+ 트랙'을 누르거나 빈 곳을 우클릭하세요.");
 
-    // 빈 공간 우클릭 -> 트랙 생성 (다른 항목 위가 아닐 때만)
-    if (ImGui::BeginPopupContextWindow("tvctx", ImGuiPopupFlags_MouseButtonRight |
-                                                   ImGuiPopupFlags_NoOpenOverItems)) {
-        if (ImGui::MenuItem("일반 트랙 생성")) addTrack(state);
-        if (ImGui::MenuItem("드럼 트랙 생성")) addDrumTrack(state);
-        if (ImGui::MenuItem("기타 트랙 생성")) addGuitarTrack(state);
+    // 빈 공간 우클릭 -> 트랙 생성 메뉴.
+    // 표(테이블)가 창을 거의 다 덮어서 예전 NoOpenOverItems 방식으로는 표 안
+    // 빈 공간(마지막 트랙 아래)에서 열리지 않았다 — 트랙 레인 위가 아니면
+    // 어디서든 직접 연다. (레인 위 우클릭은 레인 자체 메뉴가 우선)
+    if (ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows) &&
+        ImGui::IsMouseReleased(ImGuiMouseButton_Right)) {
+        const ImVec2 mp = ImGui::GetIO().MousePos;
+        bool overLane = false;
+        for (const auto& lr : state.laneRects)
+            if (mp.y >= lr.y0 && mp.y < lr.y1) { overLane = true; break; }
+        if (!overLane) ImGui::OpenPopup("tvctx");
+    }
+    if (ImGui::BeginPopup("tvctx")) {
+        ImGui::TextDisabled("새 트랙 만들기");
+        ImGui::Separator();
+        if (ImGui::MenuItem("일반 트랙")) addTrack(state);
+        if (ImGui::MenuItem("드럼 트랙")) addDrumTrack(state);
+        if (ImGui::MenuItem("기타 연습 트랙")) addGuitarTrack(state);
         ImGui::EndPopup();
     }
     ImGui::End();

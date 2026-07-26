@@ -330,7 +330,7 @@ struct AppState {
     float tvScrollReq = -1.0f; // 미니맵이 요청한 스크롤 (음수 = 요청 없음)
     float tvScrollYDelta = 0.0f; // 트랙 뷰 전용 세로 스크롤 (Shift+휠, 표가 소비)
     bool showVst = true;
-    bool showGuitar = true;
+    bool showGuitar = false; // 기타 도우미 — 기본 화면에서 뺐다 (Tool 메뉴로 켜기)
     bool showMonitor = false;  // 시작 시 꺼둔다 (Tool에서 켜기)
     bool showStatus = false;   // 시작 시 꺼둔다 (Tool에서 켜기)
     bool showSynth = false;
@@ -357,10 +357,20 @@ struct AppState {
     // applyTransportState가 프레임당 한 번만 걷고 모든 미터가 이 값을 읽는다.
     float busPeakCache[16] = {};
     float masterPeakCache[2] = {};
-    bool showPreferences = false; // 설정 > 개인설정 (MIDI 장치 + 신디사이저 분류)
+    bool showPreferences = false; // 설정 > 개인설정 (MIDI 장치 + 신디사이저 분류) // 설정 > 개인설정 (MIDI 장치 + 신디사이저 분류)
 
     bool showHelp = false;  // 도움말 > 단축키 창 (F1)
     bool showAbout = false; // 도움말 > MidiPro 정보
+
+    // 시작 화면 (첫 진입 안내: 새 곡·기타 연습·드럼·최근 파일). App이 시작 시 켠다.
+    bool showStartScreen = true;
+    bool startScreenOnLaunch = true; // "시작할 때 표시" (settings.ini에 저장)
+    bool newSongRequested = false;   // 시작 화면 '새 곡' — App이 처리(정지+초기화)
+    bool projectOpenRequested = false; // 시작 화면 '프로젝트 열기' — App이 대화상자
+
+    // 좌측 브라우저 (악기·이펙트·최근 파일 탐색)
+    bool showBrowser = true;
+    int browserTab = 0; // 0=악기 1=이펙트 2=최근
 
     // 최근 프로젝트 (파일 메뉴). App이 %LOCALAPPDATA%\MidiPro\recent.txt로 유지.
     std::vector<std::string> recentProjects; // UTF-8 경로, 최신이 앞

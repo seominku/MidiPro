@@ -22,6 +22,7 @@ struct AppSettings {
     std::string midiOutPort;   // 마지막으로 열어 둔 MIDI 출력 장치 이름
     bool midiOutAutoOpen = true;
     bool softThru = true;
+    bool startScreenOnLaunch = true; // 시작 화면을 켤 때 보일지
 };
 
 bool saveSettings(const AppSettings& s, const std::filesystem::path& path);

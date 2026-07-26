@@ -5,6 +5,7 @@
 // =============================================================
 
 #include "gui/Panels.h"
+#include "gui/Icons.h"
 #include "gui/PanelsInternal.h"
 
 #include "sequencer/TimeBase.h"
@@ -48,9 +49,8 @@ static void drawClickSoundEditor(AppState& state, int kind) {
             if (state.audioClips) state.audioClips->setClickSample(kind, nullptr);
         }
     } else {
-        // 신스 음 높이 + 음이름
-        ImGui::SetNextItemWidth(120);
-        ImGui::SliderInt("##note", &note, 36, 108, "음 %d");
+        // 신스 음 높이 + 음이름 (±1 반음 버튼으로 정확히 고른다)
+        sliderIntPM("##note", &note, 36, 108, 1, "음 %d", 120.0f);
         ImGui::SameLine();
         ImGui::TextDisabled("%s", noteName((uint8_t)std::clamp(note, 0, 127)).c_str());
         if (ImGui::SmallButton("미리듣기"))
@@ -282,7 +282,9 @@ void drawTransport(AppState& state) {
 
     // 기능을 6개 세트로 나눠 세로로 쌓고, 세로 구분선으로 가로 배치한다.
     // 메트로놈 | 카운트인은 각자 칸을 갖고 일반|강조 소리를 나란히 설정한다.
-    const float colW[6] = {130.0f, 190.0f, 170.0f, 400.0f, 400.0f, 250.0f};
+    const float ds = uiDpiScale(); // 칸 폭도 DPI만큼 (글자가 커진 만큼 넓어야 안 겹친다)
+    const float colW[6] = {130.0f * ds, 190.0f * ds, 170.0f * ds,
+                           400.0f * ds, 400.0f * ds, 250.0f * ds};
     const float tableW =
         colW[0] + colW[1] + colW[2] + colW[3] + colW[4] + colW[5] + 40.0f;
     const float availW = ImGui::GetContentRegionAvail().x;
@@ -299,24 +301,24 @@ void drawTransport(AppState& state) {
 
         // ── 세트 1: 재생/녹음 ──
         ImGui::TableSetColumnIndex(0);
-        ImGui::SeparatorText("재생");
+        sectionHeader("재생");
         if (playing) {
-            if (ImGui::Button("■ 정지", ImVec2(110, 0))) {
+            if (ImGui::Button(ICON_STOP " 정지", uiVec(110, 0))) {
                 stopTransport(state);
                 state.statusMessage = state.recording ? "녹음 정지" : "정지";
             }
         } else {
-            if (ImGui::Button("▶ 재생", ImVec2(110, 0))) startPlayback(state);
+            if (ImGui::Button(ICON_PLAY " 재생", uiVec(110, 0))) startPlayback(state);
         }
         if (state.recording) {
             ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(200, 50, 50, 255));
-            if (ImGui::Button("● 녹음중", ImVec2(110, 0))) {
+            if (ImGui::Button(ICON_RECORD " 녹음중", uiVec(110, 0))) {
                 stopTransport(state);
                 state.statusMessage = "녹음 정지";
             }
             ImGui::PopStyleColor();
         } else {
-            if (ImGui::Button("● 녹음", ImVec2(110, 0))) {
+            if (ImGui::Button(ICON_RECORD " 녹음", uiVec(110, 0))) {
                 if (state.song.tracks.empty()) { // 기록할 트랙이 없으면 하나 만든다
                     seq::Track t;
                     t.name = "Track 1";
@@ -345,7 +347,7 @@ void drawTransport(AppState& state) {
                 }
             }
         }
-        if (ImGui::Button("⟲ 처음으로", ImVec2(110, 0))) {
+        if (ImGui::Button(ICON_PREVIOUS " 처음으로", uiVec(110, 0))) {
             stopTransport(state);
             seekTo(state, 0); // 플레이헤드 + 트랙 뷰/피아노 롤 화면도 처음으로
         }
@@ -365,10 +367,9 @@ void drawTransport(AppState& state) {
 
         // ── 세트 2: 템포·위치 ──
         ImGui::TableSetColumnIndex(1);
-        ImGui::SeparatorText("템포·위치");
+        sectionHeader("템포·위치");
         float bpm = (float)state.song.bpm;
-        ImGui::SetNextItemWidth(130);
-        if (ImGui::SliderFloat("BPM", &bpm, 40.0f, 240.0f, "%.0f")) state.song.bpm = bpm;
+        if (sliderFloatPM("BPM", &bpm, 40.0f, 240.0f, 1.0f, "%.0f", 130.0f)) state.song.bpm = bpm;
         const seq::BarBeatTick pos = seq::toBarBeatTick(state.playPosTick, state.song.ppqn);
         ImGui::Text("위치  %d : %d : %03d", pos.bar, pos.beat, pos.tick);
         ImGui::Checkbox("재생 헤드 따라가기", &state.followPlayhead);
@@ -435,7 +436,7 @@ void drawTransport(AppState& state) {
 
         // ── 세트 3: 루프 ──
         ImGui::TableSetColumnIndex(2);
-        ImGui::SeparatorText("루프");
+        sectionHeader("루프");
         if (ImGui::Checkbox("루프 켜기", &state.loopEnabled) && state.loopEnabled &&
             state.clipRange.track >= 0 && state.clipRange.t1 > state.clipRange.t0) {
             // 클립에서 Ctrl+드래그로 잡아둔 구간이 있으면 그 범위가 곧 루프가 된다
@@ -464,15 +465,14 @@ void drawTransport(AppState& state) {
 
         // ── 세트 4: 메트로놈 (켜기+박자, 일반|강조 나란히) ──
         ImGui::TableSetColumnIndex(3);
-        ImGui::SeparatorText("메트로놈");
+        sectionHeader("메트로놈");
         ImGui::Checkbox("켜기##metro", &state.metronome);
         ImGui::SameLine();
         const char* kSigs[3] = {"4/4", "3/4", "6/8"};
         ImGui::SetNextItemWidth(64);
         ImGui::Combo("##metrosig", &state.metroSigIndex, kSigs, 3); // 박자
         ImGui::SameLine();
-        ImGui::SetNextItemWidth(110);
-        ImGui::SliderFloat("음량##mv", &state.metroVolume, 0.0f, 1.5f, "%.2f");
+        sliderFloatPM("음량##mv", &state.metroVolume, 0.0f, 1.5f, 0.05f, "%.2f", 110.0f);
         ImGui::BeginGroup();
         ImGui::TextDisabled("일반 클릭");
         drawClickSoundEditor(state, 0);
@@ -485,7 +485,7 @@ void drawTransport(AppState& state) {
 
         // ── 세트 5: 카운트인 (켜기+횟수, 일반|강조 나란히) ──
         ImGui::TableSetColumnIndex(4);
-        ImGui::SeparatorText("카운트인");
+        sectionHeader("카운트인");
         ImGui::Checkbox("켜기##ci", &state.countIn);
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("재생/녹음 시작 전에 정한 횟수만큼 클릭을 셉니다.\n"
@@ -495,8 +495,7 @@ void drawTransport(AppState& state) {
         ImGui::InputInt("회##cibeats", &state.countInBeats); // 몇 번 세고 들어갈지
         state.countInBeats = std::clamp(state.countInBeats, 1, 16);
         ImGui::SameLine();
-        ImGui::SetNextItemWidth(110);
-        ImGui::SliderFloat("음량##civ", &state.countInVolume, 0.0f, 1.5f, "%.2f");
+        sliderFloatPM("음량##civ", &state.countInVolume, 0.0f, 1.5f, 0.05f, "%.2f", 110.0f);
         ImGui::BeginGroup();
         ImGui::TextDisabled("일반 클릭");
         drawClickSoundEditor(state, 1);
@@ -509,7 +508,7 @@ void drawTransport(AppState& state) {
 
         // ── 세트 6: 분기 (깃 브랜치식 버전 체크인/가지 뻗기) ──
         ImGui::TableSetColumnIndex(5);
-        ImGui::SeparatorText("분기");
+        sectionHeader("분기");
         // 체크인: 이름/메모를 적고 "생성"을 눌러야만 노드가 만들어진다.
         static char ciName[64] = "";
         static char ciNote[256] = "";

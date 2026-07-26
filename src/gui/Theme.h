@@ -62,6 +62,11 @@ struct ThemeParams {
 // 파라미터로 ImGui 스타일 전체를 다시 만든다 (즉시 적용).
 void applyThemeParams(const ThemeParams& t);
 
+// DPI 배율 (1.0 = 100%). App이 시작 시 창 DPI로 지정하면 buildStyle이
+// 여백·둥글기 등 모든 스타일 치수에 곱한다 (폰트는 App이 크게 로드).
+void setUiDpiScale(float scale);
+float uiDpiScale();
+
 // ---- 창별 스타일 오버라이드 ----
 // ImGui 스타일은 전역이라, 창을 그리기 직전에 스타일을 바꿔 끼우고 그린 뒤
 // 되돌리는 방식으로 "이 창만 다른 색"을 만든다. 켜지 않은 항목은 전체 테마를
@@ -142,5 +147,11 @@ ThemeParams themeSolarized(); // 솔라라이즈드 다크(따뜻한 갈색 배�
 ThemeParams themeHighContrast(); // 고대비(검정+노랑, 각진 모서리)
 ThemeParams themeRose();      // 로즈 핑크
 ThemeParams themeSand();      // 밝은 모래빛 라이트
+// 모던 팩
+ThemeParams themeNocturne();  // 짙은 남보라 + 청록
+ThemeParams themeDracula();   // 회보라 + 보라/핑크
+ThemeParams themeSunset();    // 자주빛 + 주황/산호
+ThemeParams themeStudio();    // 뉴트럴 그레이 + 라임
+ThemeParams themeMono();      // 미니멀 흑백 + 청회색
 
 } // namespace midipro::gui

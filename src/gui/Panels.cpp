@@ -6,6 +6,7 @@
 #include "gui/PanelsInternal.h" // 분리된 패널 파일들과 공유하는 위젯
 
 #include "audio/SynthPreset.h"
+#include "audio/BuiltinFx.h" // 브라우저의 내장 이펙트 추가 (kEq/kDelay/...)
 #include "guitar/Fretboard.h"
 #include "midi/MidiConstants.h"
 #include "midi/MidiMessage.h"
@@ -749,14 +750,14 @@ void addTrack(AppState& state) {
     state.statusMessage = "트랙 생성";
 }
 
-// 새 기타 트랙을 만들고 선택 + 타브 악보 창을 연다.
+// 새 기타 연습 트랙을 만들고 선택 + 타브 악보 창을 연다.
 void addGuitarTrack(AppState& state) {
     state.snapshot();
     int guitars = 0;
     for (const auto& t : state.song.tracks)
         if (t.isGuitar) ++guitars;
     seq::Track t;
-    t.name = guitars == 0 ? "기타" : ("기타 " + std::to_string(guitars + 1));
+    t.name = guitars == 0 ? "기타 연습" : ("기타 연습 " + std::to_string(guitars + 1));
     t.channel = (uint8_t)(state.song.tracks.size() & 0x0F);
     if ((t.channel & 0x0F) == 9) t.channel = 10; // 드럼 채널(10)은 피한다
     t.isGuitar = true;
@@ -764,7 +765,7 @@ void addGuitarTrack(AppState& state) {
     state.selectedTrack = (int)state.song.tracks.size() - 1;
     addTrackEq(state, state.song.tracks.back());
     state.showTab = true; // 타브 악보 창 바로 열기
-    state.statusMessage = "기타 트랙 생성 — 노트는 피아노 롤에서, 타브는 이 창에서";
+    state.statusMessage = "기타 연습 트랙 생성 — 노트는 피아노 롤에서, 타브는 이 창에서";
 }
 
 // 새 연습 트랙(기타 연습 창 전용)을 만들고 선택한다.
@@ -2051,7 +2052,7 @@ static void drawHelpWindow(AppState& state) {
         const char* what;
     };
     auto section = [](const char* title, const Row* rows, int n) {
-        ImGui::SeparatorText(title);
+        sectionHeader(title);
         if (ImGui::BeginTable(title, 2, ImGuiTableFlags_SizingFixedFit)) {
             ImGui::TableSetupColumn("k", ImGuiTableColumnFlags_WidthFixed, 150.0f);
             ImGui::TableSetupColumn("d", ImGuiTableColumnFlags_WidthStretch);
@@ -2395,6 +2396,7 @@ void drawMenuBar(AppState& state, bool& openRequested, bool& saveRequested) {
             ImGui::MenuItem("믹서", nullptr, &state.showMixer);
             ImGui::MenuItem("채널 (마스터/선택 트랙)", nullptr, &state.showMixerCompact);
             ImGui::MenuItem("피아노 롤", nullptr, &state.showPianoRoll);
+            ImGui::MenuItem("브라우저", nullptr, &state.showBrowser);
             ImGui::MenuItem("드럼 트랙", nullptr, &state.showDrums);
             ImGui::MenuItem("어레인지", nullptr, &state.showArrange);
             ImGui::MenuItem("기타 연습", nullptr, &state.showTab);
@@ -2469,7 +2471,7 @@ void drawMenuBar(AppState& state, bool& openRequested, bool& saveRequested) {
         ImGui::SetNextWindowSize(ImVec2(360, 0), ImGuiCond_FirstUseEver);
         if (ImGui::Begin("MidiPro 정보", &state.showAbout,
                          ImGuiWindowFlags_AlwaysAutoResize)) {
-            ImGui::TextUnformatted("MidiPro 1.2.1");
+            ImGui::TextUnformatted("MidiPro 1.3.0");
             ImGui::TextDisabled("MIDI 시퀀서 + 오디오 녹음 + VST3 호스트");
             ImGui::Text("빌드: %s", __DATE__);
             ImGui::Separator();
@@ -2628,7 +2630,7 @@ static void drawSynthBody(AppState& state) {
     ImGui::TextDisabled("출력 대상을 '내장 신디사이저'로 두고 열면 소리가 납니다.");
 
     // ---- 오디오 출력 장치 (포커스라이트 등 인터페이스 선택) ----
-    ImGui::SeparatorText("오디오 출력 장치");
+    sectionHeader("오디오 출력 장치");
     {
         const auto devices = state.synth->listOutputDevices();
         const int cur = state.synth->outputDevice();
@@ -2679,7 +2681,7 @@ static void drawSynthBody(AppState& state) {
     bool changed = false;
 
     // ---- 프리셋 ----
-    ImGui::SeparatorText("프리셋");
+    sectionHeader("프리셋");
     const auto& presets = audio::builtinPresets();
     if (state.selectedPreset >= (int)presets.size()) state.selectedPreset = 0;
     ImGui::SetNextItemWidth(180);
@@ -2714,31 +2716,31 @@ static void drawSynthBody(AppState& state) {
     ImGui::TextDisabled("각 슬라이더 옆 [Learn]을 누르고 컨트롤러 노브를 움직이면 CC가 연결됩니다.");
 
     using mapping::ParamTarget;
-    ImGui::SeparatorText("ADSR 엔벨로프");
+    sectionHeader("ADSR 엔벨로프");
     changed |= learnableSlider(state, "Attack",  ParamTarget::Attack,  p.adsr.attackSec,  "%.3f s");
     changed |= learnableSlider(state, "Decay",   ParamTarget::Decay,   p.adsr.decaySec,   "%.3f s");
     changed |= learnableSlider(state, "Sustain", ParamTarget::Sustain, p.adsr.sustain,    "%.2f");
     changed |= learnableSlider(state, "Release", ParamTarget::Release, p.adsr.releaseSec, "%.3f s");
 
-    ImGui::SeparatorText("필터 (저역통과)");
+    sectionHeader("필터 (저역통과)");
     changed |= learnableSlider(state, "Cutoff", ParamTarget::FilterCutoff, p.filterCutoff, "%.0f Hz");
     changed |= learnableSlider(state, "Resonance", ParamTarget::FilterResonance, p.filterResonance,
                                "%.2f");
 
-    ImGui::SeparatorText("LFO (필터 변조)");
+    sectionHeader("LFO (필터 변조)");
     changed |= learnableSlider(state, "Rate", ParamTarget::LfoRate, p.lfoRateHz, "%.2f Hz");
     changed |= learnableSlider(state, "Depth", ParamTarget::LfoDepth, p.lfoDepth, "%.2f");
 
-    ImGui::SeparatorText("딜레이 (간이 리버브)");
+    sectionHeader("딜레이 (간이 리버브)");
     changed |= ImGui::SliderFloat("Time", &p.delayTimeSec, 0.02f, 0.9f, "%.2f s");
     changed |= ImGui::SliderFloat("Feedback", &p.delayFeedback, 0.0f, 0.95f, "%.2f");
     changed |= learnableSlider(state, "Mix", ParamTarget::DelayMix, p.delayMix, "%.2f");
 
-    ImGui::SeparatorText("마스터");
+    sectionHeader("마스터");
     changed |= learnableSlider(state, "Volume", ParamTarget::MasterVolume, p.masterVolume, "%.2f");
 
     // ---- 컨트롤러 매핑 관리 ----
-    ImGui::SeparatorText("컨트롤러 매핑 (MIDI Learn)");
+    sectionHeader("컨트롤러 매핑 (MIDI Learn)");
     if (state.learnArmed)
         ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.2f, 1.0f), "학습 대기 중: [%s] — 노브를 움직이세요",
                            mapping::paramInfo(state.learnTarget).name);
@@ -2789,7 +2791,7 @@ static void drawAsioBody(AppState& state) {
     ImGui::TextDisabled("ASIO는 오디오 인터페이스 드라이버와 직접 통신해 지연을 최소화합니다.\n"
                         "(모니터/녹음은 트랙 뷰의 각 트랙에서 시작합니다)");
 
-    ImGui::SeparatorText("ASIO 장치");
+    sectionHeader("ASIO 장치");
     ImGui::TextDisabled("시작할 때 자동으로 검색하고 첫 장치를 선택합니다.");
     // 드라이버 로드가 무거워 매 프레임이 아니라 버튼을 누를 때만 다시 스캔한다.
     if (ImGui::Button("다시 검색##asio")) {
@@ -2827,7 +2829,7 @@ static void drawAsioBody(AppState& state) {
         }
     }
 
-    ImGui::SeparatorText("버퍼 (레이턴시)");
+    sectionHeader("버퍼 (레이턴시)");
     const double sr = state.audioClips ? state.audioClips->engineSampleRate() : 48000.0;
     if (in->asioActive()) {
         // ASIO는 드라이버가 버퍼·샘플레이트를 정한다 — 여기서는 보여주기만.
@@ -2891,12 +2893,10 @@ static bool drawBgPlacement(float& scale, float& posX, float& posY, const char* 
         ImGui::SetTooltip("원본 크기 대비 배율입니다 (100%% = 원본 그대로).\n"
                           "드래그로 조절, 더블클릭으로 직접 입력.");
     std::snprintf(id, sizeof(id), "가로 위치##bgpl%s", idSuffix);
-    ImGui::SetNextItemWidth(200);
-    changed |= ImGui::SliderFloat(id, &posX, 0.0f, 1.0f, "%.2f");
+    changed |= sliderFloatPM(id, &posX, 0.0f, 1.0f, 0.02f, "%.2f", 200.0f);
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("0=왼쪽 · 0.5=가운데 · 1=오른쪽");
     std::snprintf(id, sizeof(id), "세로 위치##bgpl%s", idSuffix);
-    ImGui::SetNextItemWidth(200);
-    changed |= ImGui::SliderFloat(id, &posY, 0.0f, 1.0f, "%.2f");
+    changed |= sliderFloatPM(id, &posY, 0.0f, 1.0f, 0.02f, "%.2f", 200.0f);
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("0=위 · 0.5=가운데 · 1=아래");
     std::snprintf(id, sizeof(id), "가운데·원본 크기로##bgpl%s", idSuffix);
     if (ImGui::SmallButton(id)) {
@@ -2981,8 +2981,7 @@ static bool drawBgLayers(AppState& state, std::vector<BgLayer>& layers, int targ
     ImGui::Separator();
     ImGui::TextDisabled("%d번 이미지 설정", state.bgLayerSel + 1);
     std::snprintf(id, sizeof(id), "진하기##bgl%s", sfx);
-    ImGui::SetNextItemWidth(200);
-    changed |= ImGui::SliderFloat(id, &L.opacity, 0.0f, 1.0f, "%.2f");
+    changed |= sliderFloatPM(id, &L.opacity, 0.0f, 1.0f, 0.05f, "%.2f", 200.0f);
     std::snprintf(id, sizeof(id), "표시 방식##bgl%s", sfx);
     ImGui::SetNextItemWidth(160);
     const char* kFits[] = {"채우기 (잘림)", "맞추기 (여백)", "타일", "직접 지정"};
@@ -3051,8 +3050,7 @@ void drawThemeBody(AppState& state) {
 
     // 기본 단계: 밝기 하나만 + 안전장치
     ImGui::Spacing();
-    ImGui::SetNextItemWidth(220);
-    changed |= ImGui::SliderFloat("밝기", &t.bg, 0.0f, 1.0f, "%.2f");
+    changed |= sliderFloatPM("밝기", &t.bg, 0.0f, 1.0f, 0.02f, "%.2f", 220.0f);
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("왼쪽=어둡게, 오른쪽=밝게");
     ImGui::SameLine();
@@ -3116,9 +3114,9 @@ void drawThemeBody(AppState& state) {
     if (state.themeTargetWindow < 0) {
         // 전체 테마 (밝기는 위 기본 단계에 이미 있으므로 여기선 뺀다)
         changed |= ImGui::ColorEdit3("강조색", t.accent);
-        changed |= ImGui::SliderFloat("글자 밝기", &t.text, 0.0f, 1.0f, "%.2f");
-        changed |= ImGui::SliderFloat("모서리 둥글기", &t.rounding, 0.0f, 12.0f, "%.0f");
-        changed |= ImGui::SliderFloat("패널 불투명도", &t.panelAlpha, 0.15f, 1.0f, "%.2f");
+        changed |= sliderFloatPM("글자 밝기", &t.text, 0.0f, 1.0f, 0.02f, "%.2f");
+        changed |= sliderFloatPM("모서리 둥글기", &t.rounding, 0.0f, 12.0f, 1.0f, "%.0f");
+        changed |= sliderFloatPM("패널 불투명도", &t.panelAlpha, 0.15f, 1.0f, 0.02f, "%.2f");
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("창(패널) 배경의 불투명도입니다.\n"
                               "낮추면 뒤에 깔아둔 배경 이미지가 비쳐 보입니다.");
@@ -3149,25 +3147,25 @@ void drawThemeBody(AppState& state) {
         changed |= ImGui::Checkbox("##ub", &ov.useBg);
         ImGui::SameLine();
         ImGui::BeginDisabled(!ov.useBg);
-        changed |= ImGui::SliderFloat("배경 밝기##w", &ov.bg, 0.0f, 1.0f, "%.2f");
+        changed |= sliderFloatPM("배경 밝기##w", &ov.bg, 0.0f, 1.0f, 0.02f, "%.2f");
         ImGui::EndDisabled();
 
         changed |= ImGui::Checkbox("##ut", &ov.useText);
         ImGui::SameLine();
         ImGui::BeginDisabled(!ov.useText);
-        changed |= ImGui::SliderFloat("글자 밝기##w", &ov.text, 0.0f, 1.0f, "%.2f");
+        changed |= sliderFloatPM("글자 밝기##w", &ov.text, 0.0f, 1.0f, 0.02f, "%.2f");
         ImGui::EndDisabled();
 
         changed |= ImGui::Checkbox("##ur", &ov.useRounding);
         ImGui::SameLine();
         ImGui::BeginDisabled(!ov.useRounding);
-        changed |= ImGui::SliderFloat("모서리 둥글기##w", &ov.rounding, 0.0f, 12.0f, "%.0f");
+        changed |= sliderFloatPM("모서리 둥글기##w", &ov.rounding, 0.0f, 12.0f, 1.0f, "%.0f");
         ImGui::EndDisabled();
 
         changed |= ImGui::Checkbox("##up", &ov.usePanelAlpha);
         ImGui::SameLine();
         ImGui::BeginDisabled(!ov.usePanelAlpha);
-        changed |= ImGui::SliderFloat("패널 불투명도##w", &ov.panelAlpha, 0.15f, 1.0f, "%.2f");
+        changed |= sliderFloatPM("패널 불투명도##w", &ov.panelAlpha, 0.15f, 1.0f, 0.02f, "%.2f");
         ImGui::EndDisabled();
         ImGui::EndDisabled();
 
@@ -3234,7 +3232,7 @@ void drawThemeBody(AppState& state) {
                 changed = true;
             }
             ImGui::SetNextItemWidth(160);
-            if (ImGui::SliderFloat("진하기", &sk.opacity, 0.1f, 1.0f, "%.2f")) changed = true;
+            if (sliderFloatPM("진하기", &sk.opacity, 0.1f, 1.0f, 0.05f, "%.2f")) changed = true;
             // 붙이는 범위 오프셋 (픽셀). 늘리면 넘쳐서 잘리고, 줄이면 안쪽으로 당겨진다.
             const float ow = 66.0f;
             ImGui::SetNextItemWidth(ow);
@@ -3417,7 +3415,7 @@ void drawVst(AppState& state) {
         state.vstScanned = vst::scanVst3Plugins();
         state.vstScanDone = true;
     }
-    ImGui::SeparatorText("설치된 플러그인");
+    sectionHeader("설치된 플러그인");
     if (ImGui::Button("새로고침")) {
         state.vstScanned = vst::scanVst3Plugins();
         state.vstEffectsFiltered = false; // +FX 필터 캐시 무효화
@@ -3442,7 +3440,7 @@ void drawVst(AppState& state) {
         ImGui::TextDisabled("표준 VST3 폴더에서 플러그인을 찾지 못했습니다.");
 
     // ---- 악기 (VSTi) ----
-    ImGui::SeparatorText("악기 (VSTi)");
+    sectionHeader("악기 (VSTi)");
     if (!state.vst->instrumentActive() && !state.vstScanned.empty()) {
         if (state.vstPickInstrument < 0) state.vstPickInstrument = 0;
         if (state.vstPickInstrument >= (int)state.vstScanned.size())
@@ -3518,7 +3516,7 @@ void drawVst(AppState& state) {
     }
 
     // ---- 이펙트 ----
-    ImGui::SeparatorText("이펙트 (출력 후처리)");
+    sectionHeader("이펙트 (출력 후처리)");
     if (!state.vst->effectActive() && !state.vstScanned.empty()) {
         if (state.vstPickEffect < 0 || state.vstPickEffect >= (int)state.vstScanned.size())
             state.vstPickEffect = 0;
@@ -3578,7 +3576,7 @@ void drawGuitarHelper(AppState& state) {
     drawPendingWindowBackground(); // 창별 배경 이미지 (예약이 있으면)
 
     // ---- 튜닝 기준음 ----
-    ImGui::SeparatorText("표준 튜닝 (누르면 재생)");
+    sectionHeader("표준 튜닝 (누르면 재생)");
     const char* stringLabels[6] = {"6 E2", "5 A2", "4 D3", "3 G3", "2 B3", "1 E4"};
     for (int i = 0; i < guitar::kStringCount; ++i) {
         if (i > 0) ImGui::SameLine();
@@ -3594,7 +3592,7 @@ void drawGuitarHelper(AppState& state) {
     }
 
     // ---- 악기 음색 ----
-    ImGui::SeparatorText("기타 음색");
+    sectionHeader("기타 음색");
     ImGui::SetNextItemWidth(120);
     ImGui::InputInt("GM 프로그램", &state.guitarProgram);
     state.guitarProgram = std::clamp(state.guitarProgram, 0, 127);
@@ -3606,7 +3604,7 @@ void drawGuitarHelper(AppState& state) {
     ImGui::TextDisabled("24 나일론 · 25 스틸 · 27 클린 · 29 오버드라이브 · 30 디스토션");
 
     // ---- 코드 지판 ----
-    ImGui::SeparatorText("코드 지판");
+    sectionHeader("코드 지판");
     ImGui::SetNextItemWidth(80);
     const char* rootPreview = guitar::pitchClassName(state.guitarRoot);
     if (ImGui::BeginCombo("루트", rootPreview)) {
@@ -3705,6 +3703,248 @@ void drawMonitor(AppState& state) {
         ImGui::SetScrollHereY(1.0f);
     ImGui::EndChild();
 
+    ImGui::End();
+}
+
+// ---------------------------------------------------------
+// 시작 화면 — 처음 진입한 사람이 무엇부터 할지 한눈에 고르게 한다.
+// 전체 화면을 어둡게 덮고 가운데에 큰 카드 버튼 + 최근 파일을 보여준다.
+// ---------------------------------------------------------
+void drawStartScreen(AppState& state) {
+    if (!state.showStartScreen) return;
+    // 모달로 띄운다 — ImGui가 딤(ModalWindowDimBg)을 "모달 뒤에만" 깔아 주므로
+    // 시작 화면 자신은 어두워지지 않는다. (예전엔 전경 드로우리스트로 딤을
+    // 그려서 시작 화면까지 어두웠다)
+    auto dismiss = [&]() {
+        state.showStartScreen = false;
+        ImGui::CloseCurrentPopup();
+    };
+
+    if (!ImGui::IsPopupOpen("MidiPro 시작")) ImGui::OpenPopup("MidiPro 시작");
+    // 화면 정중앙 (창 중심 = 뷰포트 중심). 전에 어긋나 보였던 건 캡처 도구의
+    // DPI 문제였고, 이 좌표는 정확히 동작한다 (마커 실측으로 확인).
+    const ImGuiViewport* vp = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(ImVec2(vp->Pos.x + vp->Size.x * 0.5f,
+                                   vp->Pos.y + vp->Size.y * 0.5f),
+                            ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(28.0f, 24.0f));
+    const ImGuiWindowFlags flags = ImGuiWindowFlags_AlwaysAutoResize |
+                                   ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoDocking |
+                                   ImGuiWindowFlags_NoSavedSettings;
+    if (ImGui::BeginPopupModal("MidiPro 시작", nullptr, flags)) {
+        // 로고/제목
+        if (ImFont* hf = uiHeaderFont()) ImGui::PushFont(hf);
+        ImGui::TextColored(ImGui::GetStyleColorVec4(ImGuiCol_SliderGrab), "MidiPro");
+        if (uiHeaderFont()) ImGui::PopFont();
+        ImGui::SameLine();
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextDisabled("1.3.0  ·  MIDI · 기타 연습 · 작곡");
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        // 큰 시작 버튼들 (2열). 고정 폭 버튼 = 자연 흐름이라 정확히 배치된다.
+        const ImVec2 btn = uiVec(250.0f, 54.0f);
+        if (ImGui::Button("새 곡 (빈 프로젝트)", btn)) { state.newSongRequested = true; dismiss(); }
+        ImGui::SameLine();
+        if (ImGui::Button("기타 연습 시작", btn)) { addGuitarTrack(state); dismiss(); }
+        if (ImGui::Button("드럼 비트 시작", btn)) { addDrumTrack(state); dismiss(); }
+        ImGui::SameLine();
+        if (ImGui::Button("프로젝트 열기...", btn)) { state.projectOpenRequested = true; dismiss(); }
+
+        ImGui::Spacing();
+        sectionHeader("최근 프로젝트");
+        if (state.recentProjects.empty()) {
+            ImGui::TextDisabled("아직 없습니다. 프로젝트를 저장하면 여기에 쌓입니다.");
+        } else {
+            int shown = 0;
+            for (const std::string& p : state.recentProjects) {
+                if (shown++ >= 6) break;
+                std::string name = p;
+                const std::size_t sl = p.find_last_of("/\\");
+                if (sl != std::string::npos) name = p.substr(sl + 1);
+                if (ImGui::Selectable(name.c_str(), false, 0, uiVec(508.0f, 0.0f))) {
+                    state.recentOpenPath = p;
+                    dismiss();
+                }
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", p.c_str());
+            }
+        }
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        bool onLaunch = state.startScreenOnLaunch;
+        if (ImGui::Checkbox("시작할 때 이 화면 보이기", &onLaunch))
+            state.startScreenOnLaunch = onLaunch;
+        ImGui::SameLine();
+        if (ImGui::Button("닫기", uiVec(90.0f, 0.0f))) dismiss();
+        ImGui::EndPopup();
+    } else {
+        // ESC 등으로 모달이 닫혔다 — 다음 프레임에 다시 열리지 않게 상태를 접는다.
+        state.showStartScreen = false;
+    }
+    ImGui::PopStyleVar();
+}
+
+// ---------------------------------------------------------
+// 좌측 브라우저 — 악기·이펙트·최근 파일을 한곳에서 탐색하고 클릭으로 적용한다.
+// (상용 DAW의 좌측 브라우저에 해당. 대상은 "선택한 트랙")
+// ---------------------------------------------------------
+void drawBrowser(AppState& state) {
+    if (!state.showBrowser) return;
+    if (!ImGui::Begin("브라우저", &state.showBrowser)) {
+        ImGui::End();
+        return;
+    }
+    const bool hasTrack =
+        state.selectedTrack >= 0 && state.selectedTrack < (int)state.song.tracks.size();
+    const int ch = hasTrack ? (state.song.tracks[(std::size_t)state.selectedTrack].channel & 0x0F)
+                            : -1;
+    if (hasTrack)
+        ImGui::TextDisabled("대상 트랙: %s",
+                            state.song.tracks[(std::size_t)state.selectedTrack].name.c_str());
+    else
+        ImGui::TextDisabled("대상 트랙 없음 — 트랙을 먼저 선택하세요");
+    ImGui::Separator();
+
+    // 스캔/필터를 이 창에서 처음 열 때 한 번 채운다 (트랙 [+] 메뉴와 공유하는 캐시)
+    auto ensureScan = [&]() {
+        if (!state.vstScanDone) {
+            state.vstScanned = vst::scanVst3Plugins();
+            state.vstScanDone = true;
+        }
+    };
+    auto ensureInstFilter = [&]() {
+        if (!state.vstInstrumentsFiltered && state.vst) {
+            state.vstInstrumentsOnly.clear();
+            for (const auto& e : state.vstScanned)
+                if (state.vst->pluginHasInstrumentClass(e.path))
+                    state.vstInstrumentsOnly.push_back(e);
+            state.vstInstrumentsFiltered = true;
+        }
+    };
+    auto ensureFxFilter = [&]() {
+        if (!state.vstEffectsFiltered && state.vst) {
+            state.vstEffectsOnly.clear();
+            for (const auto& e : state.vstScanned)
+                if (state.vst->pluginHasEffectClass(e.path))
+                    state.vstEffectsOnly.push_back(e);
+            state.vstEffectsFiltered = true;
+        }
+    };
+
+    if (ImGui::BeginTabBar("browsertabs")) {
+        // ── 악기 ──
+        if (ImGui::BeginTabItem("악기")) {
+            state.browserTab = 0;
+            ImGui::TextDisabled("내장 신디사이저는 트랙 기본 악기입니다.");
+            if (state.vst) {
+                if (state.vstScanned.empty()) {
+                    if (ImGui::Button("VST 플러그인 검색")) {
+                        ensureScan();
+                        ensureInstFilter();
+                    }
+                } else {
+                    ensureInstFilter();
+                    ImGui::BeginChild("instlist", ImVec2(0, 0), true);
+                    if (state.vstInstrumentsOnly.empty())
+                        ImGui::TextDisabled("악기로 쓸 수 있는 VST3가 없습니다");
+                    for (const auto& e : state.vstInstrumentsOnly) {
+                        if (ImGui::Selectable(e.name.c_str()) && hasTrack) {
+                            auto& t = state.song.tracks[(std::size_t)state.selectedTrack];
+                            std::string err;
+                            if (state.vst->loadTrackInstrument(ch, e.path, -1, err)) {
+                                for (auto it = t.plugins.begin(); it != t.plugins.end();)
+                                    it = it->isInstrument ? t.plugins.erase(it) : std::next(it);
+                                seq::TrackPlugin pl;
+                                pl.name = state.vst->trackInstrumentName(ch);
+                                if (pl.name.empty()) pl.name = e.name;
+                                pl.path = e.path;
+                                pl.isInstrument = true;
+                                pl.enabled = true;
+                                t.plugins.push_back(std::move(pl));
+                                state.statusMessage = "트랙 악기: " + e.name;
+                            } else {
+                                state.statusMessage = "악기 로드 실패: " + err;
+                            }
+                        }
+                        if (ImGui::IsItemHovered() && !hasTrack)
+                            ImGui::SetTooltip("트랙을 먼저 선택하세요");
+                    }
+                    ImGui::EndChild();
+                }
+            }
+            ImGui::EndTabItem();
+        }
+        // ── 이펙트 ──
+        if (ImGui::BeginTabItem("이펙트")) {
+            state.browserTab = 1;
+            ImGui::TextDisabled("내장 이펙트");
+            auto addBuiltin = [&](const char* label, int kind) {
+                if (ImGui::Button(label) && hasTrack && state.vst) {
+                    if (state.vst->addBuiltinTrackEffect(ch, kind))
+                        state.statusMessage = std::string("내장 이펙트 추가: ") + label;
+                }
+            };
+            addBuiltin("EQ", audio::BuiltinFx::kEq);
+            ImGui::SameLine();
+            addBuiltin("딜레이", audio::BuiltinFx::kDelay);
+            ImGui::SameLine();
+            addBuiltin("리버브", audio::BuiltinFx::kReverb);
+            ImGui::SameLine();
+            addBuiltin("컴프", audio::BuiltinFx::kCompressor);
+            ImGui::Separator();
+            ImGui::TextDisabled("VST 이펙트");
+            if (state.vst) {
+                if (state.vstScanned.empty()) {
+                    if (ImGui::Button("VST 플러그인 검색##fx")) {
+                        ensureScan();
+                        ensureFxFilter();
+                    }
+                } else {
+                    ensureFxFilter();
+                    ImGui::BeginChild("fxlist", ImVec2(0, 0), true);
+                    if (state.vstEffectsOnly.empty())
+                        ImGui::TextDisabled("이펙트로 쓸 수 있는 VST3가 없습니다");
+                    for (const auto& e : state.vstEffectsOnly) {
+                        if (ImGui::Selectable(e.name.c_str()) && hasTrack) {
+                            auto& t = state.song.tracks[(std::size_t)state.selectedTrack];
+                            std::string err;
+                            if (state.vst->loadTrackEffect(ch, e.path, -1, err)) {
+                                seq::TrackPlugin pl;
+                                pl.name = e.name;
+                                pl.path = e.path;
+                                pl.isInstrument = false;
+                                pl.enabled = true;
+                                t.plugins.push_back(std::move(pl));
+                                state.statusMessage = "트랙 이펙트: " + e.name;
+                            } else {
+                                state.statusMessage = "이펙트 로드 실패: " + err;
+                            }
+                        }
+                        if (ImGui::IsItemHovered() && !hasTrack)
+                            ImGui::SetTooltip("트랙을 먼저 선택하세요");
+                    }
+                    ImGui::EndChild();
+                }
+            }
+            ImGui::EndTabItem();
+        }
+        // ── 최근 ──
+        if (ImGui::BeginTabItem("최근")) {
+            state.browserTab = 2;
+            if (state.recentProjects.empty())
+                ImGui::TextDisabled("최근 연 프로젝트가 없습니다.");
+            for (const std::string& p : state.recentProjects) {
+                std::string name = p;
+                const std::size_t sl = p.find_last_of("/\\");
+                if (sl != std::string::npos) name = p.substr(sl + 1);
+                if (ImGui::Selectable(name.c_str())) state.recentOpenPath = p;
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", p.c_str());
+            }
+            ImGui::EndTabItem();
+        }
+        ImGui::EndTabBar();
+    }
     ImGui::End();
 }
 

@@ -469,8 +469,7 @@ void drawDrums(AppState& state) {
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("재생 헤드가 있는 마디의 노트를 다음 마디에 복사합니다");
     ImGui::SameLine();
-    ImGui::SetNextItemWidth(110);
-    ImGui::SliderInt("##swing", &state.drumSwing, 0, 100, "스윙 %d%%");
+    sliderIntPM("##swing", &state.drumSwing, 0, 100, 1, "스윙 %d%%", 110.0f);
     ImGui::SameLine();
     if (ImGui::Button("적용##swing")) {
         const uint32_t gridS = std::max<uint32_t>(
@@ -502,8 +501,7 @@ void drawDrums(AppState& state) {
         const char* kStyles[] = {seq::drumStyleName(0), seq::drumStyleName(1),
                                  seq::drumStyleName(2)};
         ImGui::Combo("스타일##pat", &s_patStyle, kStyles, seq::drumStyleCount());
-        ImGui::SetNextItemWidth(120);
-        ImGui::SliderInt("마디 수##pat", &s_patBars, 1, 32, "%d마디");
+        sliderIntPM("마디 수##pat", &s_patBars, 1, 32, 1, "%d마디", 120.0f);
         ImGui::Checkbox("박자표도 이 값으로 설정##pat", &s_patSetSig);
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("4/4·3/4·6/8을 고르면 곡의 박자표도 맞춰 바꿉니다\n"
