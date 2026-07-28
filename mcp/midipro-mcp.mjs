@@ -1571,6 +1571,65 @@ const TOOLS = {
         },
     },
 
+    // --- 믹스 제어 ---------------------------------------------------------
+    midipro_mix: {
+        description:
+            '실행 중인 앱의 믹스를 조절한다 (뮤트·볼륨·팬·게인·리버브 센드). ' +
+            'get = 지금 믹스 상태 보기. track에 숫자 대신 "master"를 주면 마스터를 조절한다(뮤트·센드는 트랙만). ' +
+            '되돌리기(Ctrl+Z)가 되고, 뮤트는 재생 중에도 바로 반영된다.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                action: {
+                    type: 'string',
+                    enum: ['get', 'mute', 'unmute', 'volume', 'pan', 'gain', 'send'],
+                },
+                track: { description: '트랙 번호(0부터) 또는 "master"' },
+                value: {
+                    type: 'number',
+                    description: '볼륨 0~1.5 (1=100%), 팬 -1~1, 게인 0~2, 센드 0~1',
+                },
+            },
+            required: ['action'],
+        },
+        run(args) {
+            const a = String(args.action);
+            if (a === 'get') {
+                const r = controlSend('status');
+                if (!r.ok) throw new Error(r.error ?? '앱이 명령을 거부했습니다');
+                const pct = (v) => `${Math.round(v * 100)}%`;
+                const panTxt = (v) => (Math.abs(v) < 0.005 ? '중앙'
+                    : v < 0 ? `L${Math.round(-v * 100)}` : `R${Math.round(v * 100)}`);
+                const rows = (r.tracks ?? []).map((t) =>
+                    `  [${t.index}] ${t.name}${t.muted ? ' [뮤트]' : ''} — ` +
+                    `볼륨 ${pct(t.volume)}, 팬 ${panTxt(t.pan)}, 게인 ${t.gain.toFixed(2)}, 센드 ${pct(t.send)}`);
+                const m = r.master ?? {};
+                return `마스터 — 볼륨 ${pct(m.volume ?? 1)}, 팬 ${panTxt(m.pan ?? 0)}, 게인 ${(m.gain ?? 1).toFixed(2)}\n` +
+                       `트랙 ${r.trackCount}개:\n${rows.join('\n')}`;
+            }
+
+            if (args.track === undefined || args.track === null)
+                throw new Error('track이 필요합니다 (0부터, 또는 "master")');
+            const who = String(args.track).trim();
+            if (who !== 'master' && !/^\d+$/.test(who))
+                throw new Error(`track: 숫자(0부터) 또는 "master"여야 합니다 (받은 값: ${who})`);
+
+            let cmd;
+            if (a === 'mute' || a === 'unmute') {
+                if (who === 'master') throw new Error('마스터에는 뮤트가 없습니다');
+                cmd = `mute ${who} ${a === 'mute' ? 1 : 0}`;
+            } else {
+                const ranges = { volume: [0, 1.5], pan: [-1, 1], gain: [0, 2], send: [0, 1] };
+                const [lo, hi] = ranges[a];
+                const v = requireNum(args.value, 'value', { min: lo, max: hi });
+                cmd = `${a} ${who} ${v}`;
+            }
+            const r = controlSend(cmd);
+            if (!r.ok) throw new Error(r.error ?? '앱이 명령을 거부했습니다');
+            return r.message ?? '완료';
+        },
+    },
+
     // --- 플러그인 음색(프리셋) ---------------------------------------------
     midipro_preset: {
         description:

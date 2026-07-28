@@ -359,7 +359,7 @@ void drawTrackList(AppState& state) {
 
             // ── 오른쪽: 뮤트 + 채널 ──
             ImGui::TableSetColumnIndex(1);
-            ImGui::Checkbox("뮤트", &track.muted);
+            if (ImGui::Checkbox("뮤트", &track.muted)) refreshPlaybackIfPlaying(state);
             ImGui::SameLine();
             int ch = track.channel + 1;
             ImGui::SetNextItemWidth(60);
@@ -628,7 +628,10 @@ void drawTrackView(AppState& state) {
             }
             ImGui::SameLine();
             bool m = track.muted;
-            if (ImGui::Checkbox("M", &m)) track.muted = m;
+            if (ImGui::Checkbox("M", &m)) {
+                track.muted = m;
+                refreshPlaybackIfPlaying(state); // 재생 중이면 바로 반영
+            }
             ImGui::SameLine();
             trackTypeBadge(track); // [드럼]/[기타] 유형 표시
             char nbuf[64];

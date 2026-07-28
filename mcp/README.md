@@ -48,6 +48,7 @@ MidiPro 실행 파일은 이 순서로 찾습니다:
 | `midipro_import_midi` | `.mid` 파일 가져오기 (새 트랙들로 또는 한 트랙에 합치기) |
 | `midipro_export_midi` | 프로젝트를 표준 `.mid`(포맷 1)로 내보내기 |
 | `midipro_transport` | **실행 중인 앱 조종** (재생/정지/시크/템포/상태/저장/다시 불러오기) |
+| `midipro_mix` | 믹스 조절 (뮤트·볼륨·팬·게인·센드, 마스터 포함) |
 | `midipro_preset` | 플러그인 음색 보관·적용 (`.mppreset` / `.vstpreset`) |
 | `midipro_open` | 만든 프로젝트를 MidiPro로 열기 |
 | `midipro_status` | 설치·실행 상태, 스캔된 VST3 목록, 최근 프로젝트 |
@@ -119,6 +120,21 @@ midipro_transport  action="open"   path=...
 명령은 앱의 **UI 스레드**가 프레임마다 실행합니다 — 버튼을 누른 것과 같은
 경로라 오디오가 꼬이지 않습니다. 앱이 대화상자에 막혀 있으면 5초 뒤 그 사실을
 알려줍니다. 통로를 끄려면 `settings.ini`의 `control_pipe 0`(앱 재시작 필요).
+
+## 믹스 조절 (앱 1.3.4 이상)
+
+```
+midipro_mix  action="get"                            -> 마스터 + 트랙별 볼륨·팬·게인·센드
+midipro_mix  action="volume"  track=0  value=0.6     -> 60%
+midipro_mix  action="pan"     track=1  value=-0.4    -> L40
+midipro_mix  action="gain"    track=2  value=1.3
+midipro_mix  action="send"    track=1  value=0.25    -> 리버브 센드 25%
+midipro_mix  action="mute" | "unmute"  track=3
+midipro_mix  action="volume"  track="master"  value=0.85
+```
+
+범위는 믹서 창과 같습니다: 볼륨 0~1.5(1=100%), 팬 -1~1, 게인 0~2, 센드 0~1.
+마스터에는 뮤트·센드가 없습니다. 전부 되돌리기(Ctrl+Z)가 됩니다.
 
 ## 플러그인 음색 (앱 1.3.3 이상)
 

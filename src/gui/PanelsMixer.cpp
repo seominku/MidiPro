@@ -557,6 +557,9 @@ void drawMixer(AppState& state) {
             if (ImGui::Checkbox("뮤트##mx", &mm)) {
                 state.snapshot(); // 토글 "전" 상태를 남긴다
                 t.muted = mm;
+                // 뮤트는 재생 시작 시점의 스냅샷에 반영된다. 재생 중에 눌렀으면
+                // 지금 위치에서 다시 걸어야 바로 들린다 (안 그러면 다음 재생까지 그대로).
+                refreshPlaybackIfPlaying(state);
             }
 
             // ── 기본 EQ (저/중/고) ──

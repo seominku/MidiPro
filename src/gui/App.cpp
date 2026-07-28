@@ -921,9 +921,12 @@ std::string App::handleControlCommand(const std::string& line) {
             if (i) o << ',';
             o << "{\"index\":" << i << ",\"name\":\"" << jsonEscape(t.name) << "\""
               << ",\"channel\":" << (int)t.channel << ",\"muted\":" << (t.muted ? "true" : "false")
-              << ",\"notes\":" << notes << "}";
+              << ",\"notes\":" << notes << ",\"volume\":" << t.volume << ",\"pan\":" << t.pan
+              << ",\"gain\":" << t.gain << ",\"send\":" << t.sendLevel << "}";
         }
-        o << "]}";
+        o << "],\"master\":{\"volume\":" << m_state.song.masterVolume
+          << ",\"pan\":" << m_state.song.masterPan << ",\"gain\":" << m_state.song.masterGain
+          << "}}";
         return o.str();
     }
 
@@ -992,6 +995,71 @@ std::string App::handleControlCommand(const std::string& line) {
         return okMsg((cmd == "reload" ? "다시 불러옴: " : "열었습니다: ") + p);
     }
 
+    // ---- 믹스 제어 ----
+    // mute <트랙> <0|1> / volume|pan|gain|send <트랙|master> <값>
+    // 값은 믹서 창의 노브·페이더와 같은 범위를 쓴다.
+    if (cmd == "mute" || cmd == "volume" || cmd == "pan" || cmd == "gain" || cmd == "send") {
+        std::string who;
+        ls >> who;
+        double v = 0.0;
+        if (!(ls >> v)) return fail(cmd + ": 값이 필요합니다");
+        const bool isMaster = (who == "master" || who == "마스터");
+        if (isMaster && (cmd == "mute" || cmd == "send"))
+            return fail("마스터에는 " + cmd + "이(가) 없습니다");
+
+        int ti = -1;
+        if (!isMaster) {
+            try {
+                ti = std::stoi(who);
+            } catch (...) {
+                return fail("트랙 번호가 필요합니다 (0부터) 또는 master");
+            }
+            if (ti < 0 || ti >= (int)m_state.song.tracks.size())
+                return fail("트랙 " + who + ": 그런 트랙이 없습니다");
+        }
+        const auto clampd = [](double x, double lo, double hi) {
+            return x < lo ? lo : (x > hi ? hi : x);
+        };
+        m_state.snapshot(); // 되돌리기 (믹서 창에서 만질 때와 같다)
+
+        std::string what;
+        if (isMaster) {
+            if (cmd == "volume") {
+                m_state.song.masterVolume = (float)clampd(v, 0.0, 1.5);
+                what = "마스터 볼륨 " + std::to_string((int)(m_state.song.masterVolume * 100)) + "%";
+            } else if (cmd == "pan") {
+                m_state.song.masterPan = (float)clampd(v, -1.0, 1.0);
+                what = "마스터 팬 " + std::to_string(m_state.song.masterPan);
+            } else {
+                m_state.song.masterGain = (float)clampd(v, 0.0, 2.0);
+                what = "마스터 게인 " + std::to_string(m_state.song.masterGain);
+            }
+        } else {
+            auto& t = m_state.song.tracks[(std::size_t)ti];
+            if (cmd == "mute") {
+                t.muted = (v != 0.0);
+                what = "\"" + t.name + "\" " + (t.muted ? "뮤트" : "뮤트 해제");
+                // 뮤트는 재생 시작 시점의 스냅샷에 반영되므로, 재생 중이면
+                // 현재 위치에서 다시 걸어 즉시 들리게 한다.
+                refreshPlaybackIfPlaying(m_state);
+            } else if (cmd == "volume") {
+                t.volume = (float)clampd(v, 0.0, 1.5);
+                what = "\"" + t.name + "\" 볼륨 " + std::to_string((int)(t.volume * 100)) + "%";
+            } else if (cmd == "pan") {
+                t.pan = (float)clampd(v, -1.0, 1.0);
+                what = "\"" + t.name + "\" 팬 " + std::to_string(t.pan);
+            } else if (cmd == "gain") {
+                t.gain = (float)clampd(v, 0.0, 2.0);
+                what = "\"" + t.name + "\" 게인 " + std::to_string(t.gain);
+            } else {
+                t.sendLevel = (float)clampd(v, 0.0, 1.0);
+                what = "\"" + t.name + "\" 센드 " + std::to_string(t.sendLevel);
+            }
+        }
+        m_state.statusMessage = what;
+        return okMsg(what);
+    }
+
     // ---- 플러그인 음색(프리셋) 저장/적용 ----
     // presetsave <트랙> <슬롯> <경로> / presetload <트랙> <슬롯> <경로>
     // 슬롯: -1 = 트랙 악기, 0 이상 = 그 번호의 트랙 이펙트
@@ -1050,7 +1118,7 @@ std::string App::handleControlCommand(const std::string& line) {
 
     return fail("모르는 명령: " + cmd +
                 " (쓸 수 있는 것: ping status play stop toggle rewind seek tempo save open "
-                "reload presetsave presetload)");
+                "reload mute volume pan gain send presetsave presetload)");
 }
 
 // ---------------------------------------------------------

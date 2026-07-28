@@ -91,7 +91,7 @@ try {
 
     const list = await c.request('tools/list', {});
     const names = (list.result?.tools ?? []).map((t) => t.name);
-    check(names.length === 17, `도구 17개를 노출한다 (실제 ${names.length}개)`);
+    check(names.length === 18, `도구 18개를 노출한다 (실제 ${names.length}개)`);
     check(names.every((n) => n.startsWith('midipro_')), '도구 이름이 모두 midipro_ 로 시작한다');
     check((list.result?.tools ?? []).every((t) => t.inputSchema?.type === 'object'),
           '모든 도구가 object 스키마를 갖는다');
@@ -612,6 +612,22 @@ try {
     check(r.isError && /20~400|bpm/.test(r.text), 'tempo 범위를 잡는다');
     r = await c.call('midipro_transport', { action: 'open', path: path.join(dir, 'nope.midipro') });
     check(r.isError && /파일이 없습니다/.test(r.text), 'open에 없는 파일을 잡는다');
+
+    // 믹스: 인자 검사는 앱 없이도 확인된다
+    r = await c.call('midipro_mix', { action: 'volume' });
+    check(r.isError && /track이 필요/.test(r.text), 'mix에 track이 없으면 잡는다');
+    r = await c.call('midipro_mix', { action: 'volume', track: 'abc', value: 1 });
+    check(r.isError && /숫자\(0부터\) 또는/.test(r.text), '이상한 track 이름을 잡는다');
+    r = await c.call('midipro_mix', { action: 'volume', track: 0, value: 9 });
+    check(r.isError && /0~1.5|value/.test(r.text), '볼륨 범위를 잡는다');
+    r = await c.call('midipro_mix', { action: 'pan', track: 0, value: -5 });
+    check(r.isError && /-1~1|value/.test(r.text), '팬 범위를 잡는다');
+    r = await c.call('midipro_mix', { action: 'mute', track: 'master' });
+    check(r.isError && /마스터에는 뮤트가 없습니다/.test(r.text), '마스터 뮤트를 막는다');
+
+    const mt = (list.result?.tools ?? []).find((t) => t.name === 'midipro_mix');
+    check(mt && mt.inputSchema.properties.action.enum.includes('unmute'),
+          'mix 스키마에 unmute가 있다');
 
     // 프리셋: 파일/인자 검사는 앱 없이도 확인된다
     const cp = new Client({ MIDIPRO_DATA_DIR: path.join(dir, 'PresetData') });
