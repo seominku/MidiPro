@@ -8,9 +8,11 @@
 // =============================================================
 
 #include "gui/AppState.h"
+#include "gui/ControlServer.h"
 #include "project/Project.h"
 
 #include <filesystem>
+#include <string>
 
 namespace midipro::gui {
 
@@ -50,6 +52,11 @@ private:
     void maybeAutosave();                       // 주기적으로 호출 (변경 시에만 저장)
     double m_lastAutosaveCheck = 0.0;
     std::string m_lastAutosaveText; // 마지막 자동 저장본의 직렬화 텍스트 (변경 감지)
+
+    // ---- 외부 제어 (네임드 파이프) ----
+    // 명령 한 줄 -> 응답 JSON 한 줄. UI 스레드에서만 불린다.
+    std::string handleControlCommand(const std::string& line);
+    ControlServer m_control;
 
     AppState m_state;
 };

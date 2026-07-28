@@ -47,6 +47,7 @@ MidiPro 실행 파일은 이 순서로 찾습니다:
 | `midipro_add_effect` | FX 체인에 이펙트 추가 (VST3 또는 내장) |
 | `midipro_import_midi` | `.mid` 파일 가져오기 (새 트랙들로 또는 한 트랙에 합치기) |
 | `midipro_export_midi` | 프로젝트를 표준 `.mid`(포맷 1)로 내보내기 |
+| `midipro_transport` | **실행 중인 앱 조종** (재생/정지/시크/템포/상태/저장/다시 불러오기) |
 | `midipro_open` | 만든 프로젝트를 MidiPro로 열기 |
 | `midipro_status` | 설치·실행 상태, 스캔된 VST3 목록, 최근 프로젝트 |
 
@@ -89,6 +90,34 @@ MidiPro 피아노 롤과 같은 기준입니다 (**C4 = 60**, A0 = 21, C8 = 108)
 4. midipro_add_drums       track="드럼"    pattern={kick:"x---x---",snare:"----x---"}  repeat=4
 5. midipro_open            path=D:\곡\demo.midipro
 ```
+
+## 실행 중인 앱 조종 (앱 1.3.2 이상)
+
+앱이 `\\.\pipe\MidiPro.Control`을 열어 둡니다. `midipro_transport`가 여기에 붙습니다.
+
+```
+midipro_transport  action="status"           -> 재생 여부·위치·템포·트랙 목록
+midipro_transport  action="play" | "stop" | "toggle" | "rewind"
+midipro_transport  action="seek"   beat=16   -> 16박(4/4에서 5마디)으로 이동
+midipro_transport  action="tempo"  bpm=150
+midipro_transport  action="save"             -> 열려 있는 파일에 저장
+midipro_transport  action="reload"           -> 디스크에서 다시 불러오기
+midipro_transport  action="open"   path=...
+```
+
+**핵심 사용법** — 앱을 닫지 않고 고치기:
+
+```
+1. midipro_add_notes ... force=true      (앱이 열고 있어도 강행)
+2. midipro_transport action="reload"     (앱이 그 자리에서 새 내용을 읽는다)
+```
+
+`force` 없이 부르면 안전장치가 막습니다(아래 "주의" 참고). 고친 뒤 곧바로
+`reload`를 부르면 앱의 자동 저장이 끼어들 틈이 거의 없습니다.
+
+명령은 앱의 **UI 스레드**가 프레임마다 실행합니다 — 버튼을 누른 것과 같은
+경로라 오디오가 꼬이지 않습니다. 앱이 대화상자에 막혀 있으면 5초 뒤 그 사실을
+알려줍니다. 통로를 끄려면 `settings.ini`의 `control_pipe 0`(앱 재시작 필요).
 
 ## 드럼 샘플 자동 배정
 

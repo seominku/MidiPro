@@ -91,7 +91,7 @@ try {
 
     const list = await c.request('tools/list', {});
     const names = (list.result?.tools ?? []).map((t) => t.name);
-    check(names.length === 15, `도구 15개를 노출한다 (실제 ${names.length}개)`);
+    check(names.length === 16, `도구 16개를 노출한다 (실제 ${names.length}개)`);
     check(names.every((n) => n.startsWith('midipro_')), '도구 이름이 모두 midipro_ 로 시작한다');
     check((list.result?.tools ?? []).every((t) => t.inputSchema?.type === 'object'),
           '모든 도구가 object 스키마를 갖는다');
@@ -595,6 +595,28 @@ try {
     check(!r.isError && !/경고|주의/.test(r.text), 'MIDIPRO_OPEN_GUARD=off로 끌 수 있다');
     cOff.close();
     cg.close();
+
+    console.log('--- 앱 제어 (파이프 없을 때) ---');
+    // 실제 앱이 떠 있는지에 좌우되지 않게, 파이프가 없을 때의 동작만 검사한다.
+    // (있을 때의 동작은 앱을 실제로 띄워 따로 확인했다)
+    r = await c.call('midipro_transport', { action: 'status' });
+    if (r.isError) {
+        check(/실행 중인 MidiPro를 찾지 못했습니다|제어 통로/.test(r.text),
+              '앱이 없으면 이유를 알려준다');
+    } else {
+        check(/상태: (재생 중|정지)/.test(r.text), '앱이 떠 있으면 상태를 돌려준다');
+    }
+    r = await c.call('midipro_transport', { action: 'seek' });
+    check(r.isError && /beat/.test(r.text), 'seek에 beat가 없으면 잡는다');
+    r = await c.call('midipro_transport', { action: 'tempo', bpm: 999 });
+    check(r.isError && /20~400|bpm/.test(r.text), 'tempo 범위를 잡는다');
+    r = await c.call('midipro_transport', { action: 'open', path: path.join(dir, 'nope.midipro') });
+    check(r.isError && /파일이 없습니다/.test(r.text), 'open에 없는 파일을 잡는다');
+
+    const tt = (list.result?.tools ?? []).find((t) => t.name === 'midipro_transport');
+    check(tt && tt.inputSchema.properties.action.enum.includes('reload'),
+          'transport 스키마에 reload가 있다');
+    check(tt && !tt.inputSchema.properties.force, '앱 제어 도구엔 force가 없다 (파일을 안 고친다)');
 
     console.log('--- 상태 ---');
     r = await c.call('midipro_status', {});

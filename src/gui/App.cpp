@@ -22,6 +22,7 @@
 #include "sequencer/SmfFile.h"
 
 #include <fstream>
+#include <sstream>
 
 #include "imgui.h"
 #include "imgui_internal.h" // DockBuilder(기본 도킹 레이아웃 구성)
@@ -671,6 +672,7 @@ project::ProjectData App::buildProjectData() const {
 bool App::saveProjectTo(const std::filesystem::path& path) {
     if (!project::save(buildProjectData(), path)) return false;
     saveVstStates(path);
+    m_state.projectPath = core::pathToUtf8(path); // 이후 "저장"/외부 reload가 쓸 경로
     return true;
 }
 
@@ -863,7 +865,134 @@ bool App::loadProjectFrom(const std::filesystem::path& path) {
     if (!pd.countInSamplePath.empty()) loadClickSampleFile(1, pd.countInSamplePath);
     if (!pd.accentSamplePath.empty()) loadClickSampleFile(2, pd.accentSamplePath);
     if (!pd.countInAccentSamplePath.empty()) loadClickSampleFile(3, pd.countInAccentSamplePath);
+    m_state.projectPath = core::pathToUtf8(path); // 지금 열려 있는 파일
     return true;
+}
+
+// ---------------------------------------------------------
+// 외부 제어 명령 (ControlServer가 UI 스레드에서 부른다)
+//
+// 요청은 "명령 인자..." 한 줄, 응답은 JSON 한 줄.
+// 실행은 전부 기존 헬퍼(startPlayback/stopTransport/seekTo/loadProjectFrom...)를
+// 그대로 쓴다 — 버튼을 누른 것과 같은 경로라 새로운 위험이 없다.
+// ---------------------------------------------------------
+std::string App::handleControlCommand(const std::string& line) {
+    std::istringstream ls(line);
+    std::string cmd;
+    ls >> cmd;
+    const auto rest = [&]() { // 줄 끝까지 (경로에 공백이 흔하다)
+        std::string r;
+        std::getline(ls, r);
+        while (!r.empty() && (r.front() == ' ' || r.front() == '\t')) r.erase(0, 1);
+        while (!r.empty() && (r.back() == ' ' || r.back() == '\r')) r.pop_back();
+        return r;
+    };
+    const auto fail = [](const std::string& why) {
+        return "{\"ok\":false,\"error\":\"" + jsonEscape(why) + "\"}";
+    };
+    const auto okMsg = [](const std::string& msg) {
+        return "{\"ok\":true,\"message\":\"" + jsonEscape(msg) + "\"}";
+    };
+
+    const int ppqn = m_state.song.ppqn > 0 ? m_state.song.ppqn : seq::kDefaultPpqn;
+    const bool playing = m_state.player && m_state.player->isPlaying();
+    if (playing) m_state.playPosTick = m_state.player->currentTick();
+
+    // 앱 버전이 아니라 "제어 프로토콜" 버전을 준다 — 호환성에 필요한 건 이쪽이고,
+    // 버전 문자열을 또 한 군데 늘리지 않으려는 것도 있다.
+    if (cmd == "ping") return "{\"ok\":true,\"app\":\"MidiPro\",\"protocol\":1}";
+
+    if (cmd == "status") {
+        std::ostringstream o;
+        o << "{\"ok\":true"
+          << ",\"playing\":" << (playing ? "true" : "false")
+          << ",\"recording\":" << (m_state.recording ? "true" : "false")
+          << ",\"positionTick\":" << m_state.playPosTick
+          << ",\"positionBeat\":" << ((double)m_state.playPosTick / (double)ppqn)
+          << ",\"bpm\":" << m_state.song.bpm << ",\"ppqn\":" << ppqn
+          << ",\"projectPath\":\"" << jsonEscape(m_state.projectPath) << "\""
+          << ",\"trackCount\":" << m_state.song.tracks.size() << ",\"tracks\":[";
+        for (std::size_t i = 0; i < m_state.song.tracks.size(); ++i) {
+            const auto& t = m_state.song.tracks[i];
+            int notes = 0;
+            for (const auto& e : t.events)
+                if (e.isNoteOn()) ++notes;
+            if (i) o << ',';
+            o << "{\"index\":" << i << ",\"name\":\"" << jsonEscape(t.name) << "\""
+              << ",\"channel\":" << (int)t.channel << ",\"muted\":" << (t.muted ? "true" : "false")
+              << ",\"notes\":" << notes << "}";
+        }
+        o << "]}";
+        return o.str();
+    }
+
+    if (cmd == "play") {
+        if (!playing) startPlayback(m_state);
+        return okMsg("재생");
+    }
+    if (cmd == "stop") {
+        stopTransport(m_state);
+        silenceOutput(m_state);
+        m_state.statusMessage = "정지";
+        return okMsg("정지");
+    }
+    if (cmd == "toggle") {
+        if (playing) {
+            stopTransport(m_state);
+            silenceOutput(m_state);
+            m_state.statusMessage = "정지";
+        } else {
+            startPlayback(m_state);
+        }
+        return okMsg(playing ? "정지" : "재생");
+    }
+    if (cmd == "rewind") {
+        seekTo(m_state, 0, /*scrollView=*/true);
+        return okMsg("처음으로");
+    }
+    if (cmd == "seek") {
+        double beat = -1.0;
+        ls >> beat;
+        if (!(beat >= 0.0)) return fail("seek: 박 위치(0 이상)가 필요합니다");
+        seekTo(m_state, (uint32_t)(beat * ppqn + 0.5), /*scrollView=*/true);
+        return okMsg("이동: " + std::to_string(beat) + "박");
+    }
+    if (cmd == "tempo") {
+        double bpm = 0.0;
+        ls >> bpm;
+        if (!(bpm >= 20.0 && bpm <= 400.0)) return fail("tempo: 20~400 사이여야 합니다");
+        m_state.snapshot();
+        m_state.song.bpm = bpm;
+        if (m_state.player) m_state.player->setBpm(bpm);
+        return okMsg("템포 " + std::to_string((int)bpm) + " BPM");
+    }
+
+    if (cmd == "save") {
+        if (m_state.projectPath.empty())
+            return fail("아직 파일로 저장한 적 없는 곡입니다 — 앱에서 한 번 저장하거나 open으로 여세요");
+        const std::string p = m_state.projectPath;
+        if (!saveProjectTo(core::pathFromUtf8(p))) return fail("저장 실패: " + p);
+        addRecentProject(p);
+        m_state.statusMessage = "프로젝트 저장 완료: " + p;
+        return okMsg("저장: " + p);
+    }
+    if (cmd == "open" || cmd == "reload") {
+        std::string p = (cmd == "open") ? rest() : m_state.projectPath;
+        if (p.empty())
+            return fail(cmd == "open" ? "open: 파일 경로가 필요합니다"
+                                      : "열려 있는 프로젝트 파일이 없습니다");
+        std::error_code ec;
+        if (!std::filesystem::exists(core::pathFromUtf8(p), ec)) return fail("파일이 없습니다: " + p);
+        stopTransport(m_state);
+        if (!loadProjectFrom(core::pathFromUtf8(p))) return fail("불러오기 실패: " + p);
+        addRecentProject(p);
+        m_state.statusMessage =
+            (cmd == "reload" ? "다시 불러옴: " : "프로젝트 불러오기 완료: ") + p;
+        return okMsg((cmd == "reload" ? "다시 불러옴: " : "열었습니다: ") + p);
+    }
+
+    return fail("모르는 명령: " + cmd +
+                " (쓸 수 있는 것: ping status play stop toggle rewind seek tempo save open reload)");
 }
 
 // ---------------------------------------------------------
@@ -1044,6 +1173,10 @@ int App::run() {
     m_state.softThru = settings.softThru;
     m_state.startScreenOnLaunch = settings.startScreenOnLaunch;
     m_state.showStartScreen = settings.startScreenOnLaunch; // 켜기로 돼 있으면 시작 시 표시
+    m_state.controlPipeOn = settings.controlPipe;
+    // 외부 제어 통로. 두 번째 인스턴스면 조용히 실패하고 통로 없이 돈다.
+    if (m_state.controlPipeOn)
+        m_control.start([this](const std::string& line) { return handleControlCommand(line); });
     auto findPort = [](const std::vector<std::string>& ports, const std::string& name) {
         for (int i = 0; i < (int)ports.size(); ++i)
             if (ports[(std::size_t)i] == name) return i;
@@ -1205,10 +1338,13 @@ int App::run() {
                 L"자동 저장된 프로젝트를 복구할까요?",
                 L"MidiPro 복구", MB_YESNO | MB_ICONQUESTION);
             if (r == IDYES) {
+                const bool ok = loadProjectFrom(autosaveFile);
+                // 자동 저장본은 "지금 작업 중인 파일"이 아니다 — 여기에 덮어쓰면 안 되므로
+                // 경로를 비워 둔다(외부 제어의 save도 막힌다).
+                m_state.projectPath.clear();
                 m_state.statusMessage =
-                    loadProjectFrom(autosaveFile)
-                        ? "자동 저장본 복구됨 — '프로젝트 저장'으로 원하는 위치에 저장하세요"
-                        : "자동 저장본 복구 실패";
+                    ok ? "자동 저장본 복구됨 — '프로젝트 저장'으로 원하는 위치에 저장하세요"
+                       : "자동 저장본 복구 실패";
             }
         }
         std::ofstream(lock) << "running"; // 세션 락 생성 (정상 종료 시 삭제)
@@ -1587,6 +1723,10 @@ int App::run() {
                                        : "열 수 없습니다 (파일이 이동/삭제됐을 수 있음)";
         }
 
+        // 외부 제어 명령 (네임드 파이프). 프로젝트 열기/저장 처리 바로 뒤라
+        // 곡을 바꾸는 명령도 위 경로들과 같은 시점에 안전하게 실행된다.
+        m_control.poll();
+
         // 주기적 자동 저장 (3분마다, 변경이 있을 때만)
         maybeAutosave();
 
@@ -1886,6 +2026,7 @@ int App::run() {
         AppSettings out;
         out.softThru = m_state.softThru;
         out.startScreenOnLaunch = m_state.startScreenOnLaunch;
+        out.controlPipe = m_state.controlPipeOn;
         if (m_state.input) {
             const auto ports = m_state.input->listPorts();
             out.midiInAutoOpen = m_state.input->isOpen();
@@ -1902,6 +2043,7 @@ int App::run() {
         }
         saveSettings(out, autosaveDir() / L"settings.ini");
     }
+    m_control.stop(); // 파이프 스레드 정리 (UI가 멈추기 전에)
     {
         // 정상 종료: 세션 락을 지워 다음 실행에서 복구를 묻지 않게 한다
         std::error_code ec;

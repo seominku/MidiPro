@@ -376,6 +376,15 @@ struct AppState {
     std::vector<std::string> recentProjects; // UTF-8 경로, 최신이 앞
     std::string recentOpenPath;              // 메뉴에서 고른 경로 (App이 열고 비움)
 
+    // 지금 작업 중인 프로젝트 파일 (UTF-8). 열거나 저장할 때 갱신된다.
+    // 비어 있으면 "아직 파일로 저장한 적 없는 새 곡"이다.
+    // 외부 제어(ControlServer)의 save/reload가 이 경로를 쓴다.
+    std::string projectPath;
+
+    // 외부 제어 통로(네임드 파이프)를 켤지 (개인설정, settings.ini에 저장).
+    // 시작할 때만 반영된다 — 끄고 켜려면 앱을 다시 실행해야 한다.
+    bool controlPipeOn = true;
+
     // ---- UI 테마 (개인설정 > 테마) ----
     ThemeParams theme;              // 현재 테마 파라미터 (시작 시 파일에서 복원)
     bool showStyleEditor = false;   // 고급 스타일 편집기(ImGui 내장) 창

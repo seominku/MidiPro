@@ -23,6 +23,9 @@ struct AppSettings {
     bool midiOutAutoOpen = true;
     bool softThru = true;
     bool startScreenOnLaunch = true; // 시작 화면을 켤 때 보일지
+    // 외부 제어 통로(네임드 파이프)를 열지. 같은 PC의 도구(MCP 서버 등)가
+    // 재생/정지·프로젝트 다시 불러오기를 시킬 수 있다. 끄면 통로를 만들지 않는다.
+    bool controlPipe = true;
 };
 
 bool saveSettings(const AppSettings& s, const std::filesystem::path& path);

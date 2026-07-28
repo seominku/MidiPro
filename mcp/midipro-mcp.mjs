@@ -22,7 +22,7 @@
 // =============================================================
 
 import { existsSync, readFileSync, writeFileSync, renameSync, copyFileSync,
-         mkdirSync, readdirSync } from 'node:fs';
+         mkdirSync, readdirSync, openSync, readSync, writeSync, closeSync } from 'node:fs';
 import { execFileSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
@@ -681,6 +681,70 @@ function usedDrumNotes(song) {
 }
 
 // ------------------------------------------------------------------
+// 실행 중인 앱 제어 (네임드 파이프)
+//
+// 앱이 \\.\pipe\MidiPro.Control 을 열어 둔다(gui/ControlServer.cpp).
+// 요청은 "명령 인자..." 한 줄, 응답은 JSON 한 줄.
+//
+// 파이프는 윈도우에서 그냥 파일처럼 열린다 — 별도 라이브러리가 필요 없다.
+// 다만 노드의 파일 스트림으로는 "쓰고 나서 읽기"가 매끄럽지 않아, 열고 쓰고
+// 읽는 동안만 동기 I/O로 처리한다(명령이 드물고 응답이 짧아 문제되지 않는다).
+// ------------------------------------------------------------------
+const CONTROL_PIPE = '\\\\.\\pipe\\MidiPro.Control';
+
+function controlSend(command, { timeoutMs = 7000 } = {}) {
+    let fd;
+    try {
+        fd = openSync(CONTROL_PIPE, 'r+');
+    } catch (e) {
+        if (e.code === 'ENOENT')
+            throw new Error('실행 중인 MidiPro를 찾지 못했습니다 — 앱이 꺼져 있거나 ' +
+                            '개인설정에서 외부 제어를 꺼 두었을 수 있습니다 (settings.ini의 control_pipe). ' +
+                            'midipro_open으로 앱을 먼저 켜세요.');
+        throw new Error(`제어 통로를 열지 못했습니다: ${e.message}`);
+    }
+    try {
+        const out = Buffer.from(command + '\n', 'utf8');
+        writeSync(fd, out, 0, out.length);
+        const deadline = Date.now() + timeoutMs;
+        const chunk = Buffer.alloc(64 * 1024);
+        let acc = '';
+        for (;;) {
+            let n = 0;
+            try {
+                n = readSync(fd, chunk, 0, chunk.length, null);
+            } catch (e) {
+                if (e.code === 'EAGAIN') { n = 0; } else throw e;
+            }
+            if (n > 0) {
+                acc += chunk.subarray(0, n).toString('utf8');
+                const nl = acc.indexOf('\n');
+                if (nl >= 0) {
+                    const line = acc.slice(0, nl).trim();
+                    try {
+                        return JSON.parse(line);
+                    } catch {
+                        throw new Error(`앱의 응답을 해석하지 못했습니다: ${line.slice(0, 200)}`);
+                    }
+                }
+            }
+            if (Date.now() > deadline)
+                throw new Error('앱이 제한 시간 안에 응답하지 않았습니다 ' +
+                                '(대화상자가 열려 있거나 바쁜 상태일 수 있습니다)');
+        }
+    } finally {
+        try { closeSync(fd); } catch {}
+    }
+}
+
+// 앱이 살아 있는지 (제어 통로가 열려 있는지)
+function controlAlive() {
+    try {
+        return controlSend('ping', { timeoutMs: 1500 })?.ok === true;
+    } catch { return false; }
+}
+
+// ------------------------------------------------------------------
 // MidiPro 실행 파일 찾기
 // ------------------------------------------------------------------
 function findMidiProExe() {
@@ -740,8 +804,9 @@ function guardProjectOpen(file, force) {
     if (s.same && !force)
         throw new Error(
             `MidiPro가 이 프로젝트를 열고 있는 것 같습니다 — 지금 고치면 앱이 자동 저장할 때 편집이 사라집니다.\n` +
-            `  1) 앱에서 저장하고 닫은 뒤 다시 하세요 (권장)\n` +
-            `  2) 앱이 이미 꺼져 있는데 이 메시지가 나오면 비정상 종료로 남은 세션 표시입니다 — ` +
+            `  1) force: true 로 고친 뒤 곧바로 midipro_transport(action="reload")를 부르세요 (앱을 닫지 않아도 됩니다)\n` +
+            `  2) 또는 앱에서 저장하고 닫은 뒤 다시 하세요\n` +
+            `  3) 앱이 이미 꺼져 있는데 이 메시지가 나오면 비정상 종료로 남은 세션 표시입니다 — ` +
             `앱을 한 번 켰다 정상 종료하거나 force: true 로 넘기세요\n` +
             `파일: ${file}`);
     if (s.same) return '[주의] 앱이 이 프로젝트를 열고 있는데 force로 강행했습니다 — 앱에서 저장하면 이 편집이 덮어써집니다.';
@@ -1454,6 +1519,58 @@ const TOOLS = {
         },
     },
 
+    // --- 실행 중인 앱 제어 -------------------------------------------------
+    midipro_transport: {
+        description:
+            '실행 중인 MidiPro를 그 자리에서 조종한다 (앱을 닫지 않아도 된다). ' +
+            'play/stop/toggle/rewind = 재생 제어, seek = 위치 이동(박), tempo = 템포 변경, ' +
+            'status = 지금 상태(재생 여부·위치·트랙), save = 열려 있는 파일에 저장, ' +
+            'reload = 디스크에서 다시 불러오기. ' +
+            '**MCP로 파일을 고친 뒤 reload를 부르면 앱을 껐다 켜지 않고 바로 반영된다.**',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                action: {
+                    type: 'string',
+                    enum: ['status', 'play', 'stop', 'toggle', 'rewind', 'seek', 'tempo', 'save', 'reload', 'open'],
+                    description: '무엇을 할지',
+                },
+                beat: { type: 'number', description: 'seek일 때 이동할 위치 (박, 0이 곡 시작)' },
+                bpm: { type: 'number', description: 'tempo일 때 새 템포 (20~400)' },
+                path: { type: 'string', description: 'open일 때 열 .midipro 경로' },
+            },
+            required: ['action'],
+        },
+        run(args) {
+            const a = String(args.action);
+            let cmd = a;
+            if (a === 'seek') {
+                const b = requireNum(args.beat, 'beat', { min: 0 });
+                cmd = `seek ${b}`;
+            } else if (a === 'tempo') {
+                const b = requireNum(args.bpm, 'bpm', { min: 20, max: 400 });
+                cmd = `tempo ${b}`;
+            } else if (a === 'open') {
+                if (!args.path) throw new Error('open: path가 필요합니다');
+                const p = path.resolve(String(args.path));
+                if (!existsSync(p)) throw new Error(`파일이 없습니다: ${p}`);
+                cmd = `open ${p}`;
+            }
+            const r = controlSend(cmd);
+            if (!r.ok) throw new Error(r.error ?? '앱이 명령을 거부했습니다');
+            if (a !== 'status') return r.message ?? '완료';
+
+            const bar = (r.positionBeat / 4) + 1; // 4/4 기준 표시용
+            const lines = (r.tracks ?? []).map((t) =>
+                `  [${t.index}] ${t.name} — 채널 ${t.channel + 1}${t.muted ? ', 뮤트' : ''}, 노트 ${t.notes}개`);
+            return `상태: ${r.playing ? '재생 중' : '정지'}${r.recording ? ' (녹음)' : ''}\n` +
+                   `위치: ${r.positionBeat.toFixed(3)}박 (약 ${bar.toFixed(2)}마디, 4/4) / ${r.positionTick}틱\n` +
+                   `템포: ${r.bpm} BPM, ppqn ${r.ppqn}\n` +
+                   `프로젝트: ${r.projectPath || '(저장한 적 없는 새 곡)'}\n` +
+                   `트랙 ${r.trackCount}개:\n${lines.join('\n')}`;
+        },
+    },
+
     // --- 앱으로 열기 -----------------------------------------------------
     midipro_open: {
         description:
@@ -1505,6 +1622,7 @@ const TOOLS = {
             return JSON.stringify({
                 exe: exe ?? '(찾지 못함 — 환경변수 MIDIPRO_EXE로 지정하세요)',
                 running: isMidiProRunning(),
+                controlChannel: controlAlive(), // true면 midipro_transport로 조종할 수 있다
                 sessionLive: sess.live,
                 likelyOpenProject: sess.live ? sess.top : null,
                 userDataDir: ad,

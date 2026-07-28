@@ -28,7 +28,7 @@ set GUILIBS=winmm.lib ole32.lib oleaut32.lib shell32.lib advapi32.lib user32.lib
 echo === Building GUI app (MidiPro.exe) ===
 rc /nologo /fo build\app.res src\app.rc
 if errorlevel 1 ( echo [ERROR] rc failed & exit /b 1 )
-cl %CFLAGS% %INC% src\main_gui.cpp src\gui\App.cpp src\gui\Panels.cpp src\gui\PanelsMixer.cpp src\gui\PanelsTransport.cpp src\gui\PanelsTrackView.cpp src\gui\PanelsPianoRoll.cpp src\gui\PanelsDrums.cpp src\gui\PanelsArrange.cpp src\gui\PanelsGuitarTab.cpp src\gui\Theme.cpp src\gui\BackgroundImage.cpp src\gui\UiSkin.cpp src\gui\Settings.cpp %CORE% %MIDI% %AUDIO% %SEQ% %PDFTAB% %GUITAR% %MAPPING% %PROJECT% %VST% %IMGUI% %GUILIBS% build\app.res /Fe:build\MidiPro.exe /Fo:build\ /link /SUBSYSTEM:WINDOWS
+cl %CFLAGS% %INC% src\main_gui.cpp src\gui\App.cpp src\gui\Panels.cpp src\gui\PanelsMixer.cpp src\gui\PanelsTransport.cpp src\gui\PanelsTrackView.cpp src\gui\PanelsPianoRoll.cpp src\gui\PanelsDrums.cpp src\gui\PanelsArrange.cpp src\gui\PanelsGuitarTab.cpp src\gui\Theme.cpp src\gui\BackgroundImage.cpp src\gui\UiSkin.cpp src\gui\Settings.cpp src\gui\ControlServer.cpp %CORE% %MIDI% %AUDIO% %SEQ% %PDFTAB% %GUITAR% %MAPPING% %PROJECT% %VST% %IMGUI% %GUILIBS% build\app.res /Fe:build\MidiPro.exe /Fo:build\ /link /SUBSYSTEM:WINDOWS
 if errorlevel 1 ( echo [ERROR] GUI build failed & exit /b 1 )
 
 echo === Building console app (MidiProConsole.exe) ===

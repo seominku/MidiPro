@@ -2471,7 +2471,7 @@ void drawMenuBar(AppState& state, bool& openRequested, bool& saveRequested) {
         ImGui::SetNextWindowSize(ImVec2(360, 0), ImGuiCond_FirstUseEver);
         if (ImGui::Begin("MidiPro 정보", &state.showAbout,
                          ImGuiWindowFlags_AlwaysAutoResize)) {
-            ImGui::TextUnformatted("MidiPro 1.3.1");
+            ImGui::TextUnformatted("MidiPro 1.3.2");
             ImGui::TextDisabled("MIDI 시퀀서 + 오디오 녹음 + VST3 호스트");
             ImGui::Text("빌드: %s", __DATE__);
             ImGui::Separator();
