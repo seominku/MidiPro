@@ -10,10 +10,15 @@
 //   맞지 않아 건드리지 않았다.
 //
 // 조작:
-//   빈 칸 클릭      그 줄에 노트 추가 (기본 프렛 0 = 개방현)
-//   노트 드래그     좌우 = 시각, 위아래 = 줄 (프렛 유지 -> 음이 바뀐다)
-//   휠 / [ ]        가리킨 노트의 프렛 -1/+1
-//   우클릭 / Del    삭제
+//   빈 칸 클릭        그 줄에 노트 추가 (기본 프렛 0 = 개방현)
+//   노트 몸통 드래그  좌우 = 시각, 위아래 = 줄 (프렛 유지 -> 음이 바뀐다)
+//   노트 오른쪽 끝    드래그로 길이 늘이기/줄이기
+//   휠 / 위아래 화살표 고른 노트의 프렛 -1/+1
+//   숫자 키          고른 노트의 프렛을 직접 입력 (두 자리까지)
+//   우클릭 / Del     삭제
+//
+// 입력은 InvisibleButton으로 받는다 — 그래야 ImGui가 hover/active를 제대로
+// 잡아주고, 자식 창 스크롤과 휠이 서로 먹히지 않는다.
 // =============================================================
 
 #include "gui/Panels.h"
@@ -43,13 +48,30 @@ TabTuning trackTuning(const seq::Track& t) {
     return t.isGuitar ? TabTuning::Guitar6 : TabTuning::None;
 }
 
-struct Drag {
-    bool active = false;
-    seq::NoteSpan span{};   // 잡은 노트(원본)
-    int fret = 0;           // 잡을 때의 프렛 (줄을 옮겨도 유지)
-    uint32_t grabTick = 0;  // 잡은 지점과 노트 시작의 차이
+enum class EditMode { None, Move, Resize };
+
+struct EditState {
+    EditMode mode = EditMode::None;
+    seq::NoteSpan span{};  // 잡은/고른 노트
+    int fret = 0;          // 잡을 때의 프렛 (줄을 옮겨도 유지)
+    uint32_t grabTick = 0; // 잡은 지점과 노트 시작의 차이
+    bool hasSel = false;   // 고른 노트가 있나 (span이 그것)
+    int fretTyping = -1;   // 숫자 키로 입력 중인 프렛 (-1 = 입력 안 함)
 };
-Drag g_drag;
+EditState g_ed;
+
+bool sameSpan(const seq::NoteSpan& a, const seq::NoteSpan& b) {
+    return a.startTick == b.startTick && a.endTick == b.endTick && a.note == b.note;
+}
+
+// 노트를 지우고 새 자리에 다시 놓는다 (되돌리기 1회로 묶인다)
+void replaceNote(AppState& state, seq::Track& track, const seq::NoteSpan& oldSpan, uint32_t start,
+                 uint32_t len, int note, uint8_t vel) {
+    state.snapshot();
+    seq::removeNote(track, oldSpan);
+    track.addNote(start, std::max<uint32_t>(len, 1), (uint8_t)note, vel);
+    refreshPlaybackIfPlaying(state);
+}
 
 } // namespace
 
@@ -123,7 +145,8 @@ void drawStringTab(AppState& state) {
     const uint32_t snapTicks = noteLen;
 
     ImGui::SameLine();
-    ImGui::TextDisabled("클릭=찍기  드래그=이동(위아래=줄)  휠=프렛  우클릭=삭제");
+    ImGui::TextDisabled("클릭=찍기 · 드래그=이동(↕줄) · 오른쪽 끝 드래그=길이 · "
+                        "휠/↑↓=프렛 · 숫자=프렛 입력 · Shift+←→=길이 · 우클릭/Del=삭제");
 
     // ── 격자 ──
     const float S = uiDpiScale();
@@ -131,10 +154,17 @@ void drawStringTab(AppState& state) {
     const float zoom = 0.25f * S; // px/tick (피아노 롤 기본과 같은 감각)
     const float gridH = rowH * (float)ti.stringCount;
 
+    // NoScrollWithMouse: 세로 스크롤이 없는 창에서 ImGui는 휠을 가로 스크롤에 쓴다.
+    // 그러면 휠로 프렛을 바꾸려 할 때 화면이 옆으로 밀려 조작이 안 먹는 것처럼 보인다.
+    // 휠은 프렛 전용으로 두고, 가로 이동은 아래 스크롤바로 한다.
     ImGui::BeginChild("##stgrid", ImVec2(0, gridH + rulerH + 8.0f), ImGuiChildFlags_Borders,
-                      ImGuiWindowFlags_HorizontalScrollbar);
+                      ImGuiWindowFlags_HorizontalScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
     const uint32_t songLen = std::max<uint32_t>(track.lengthTicks(), (uint32_t)(ppqn * 16));
-    ImGui::Dummy(ImVec2((float)(songLen + ppqn * 4) * zoom, gridH + rulerH));
+    const float canvasW = labelW + (float)(songLen + ppqn * 4) * zoom;
+    // InvisibleButton으로 입력을 받는다 (Dummy는 hover/active를 안 준다)
+    ImGui::InvisibleButton("##stcanvas", ImVec2(canvasW, gridH + rulerH),
+                           ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight);
+    const bool canvasHovered = ImGui::IsItemHovered();
 
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const ImVec2 p0 = ImGui::GetItemRectMin();
@@ -169,34 +199,7 @@ void drawStringTab(AppState& state) {
         dl->AddLine(ImVec2(x, gridTop), ImVec2(x, gridTop + gridH), IM_COL32(240, 90, 90, 230), 1.6f);
     }
 
-    // ── 노트 그리기 + 히트 테스트 ──
-    const auto notes = seq::extractNotes(track);
-    const ImVec2 mouse = ImGui::GetIO().MousePos;
-    const bool hovered = ImGui::IsWindowHovered();
-    int hitIdx = -1;
-
-    for (std::size_t i = 0; i < notes.size(); ++i) {
-        const auto& n = notes[i];
-        int s = 0, fret = 0;
-        const bool ok = tabAssign(tuning, n.note, s, fret);
-        const int r = ok ? (ti.stringCount - 1 - s) : 0;
-        const float y = gridTop + rowH * (float)r + rowH * 0.5f;
-        const float xa = x0 + (float)n.startTick * zoom;
-        const float xb = x0 + (float)n.endTick * zoom;
-        const ImU32 col = ok ? IM_COL32(120, 140, 240, 220) : IM_COL32(220, 90, 80, 220);
-        dl->AddRectFilled(ImVec2(xa, y - rowH * 0.34f), ImVec2(std::max(xb, xa + 6.0f), y + rowH * 0.34f),
-                          col, 3.0f);
-        char b[8];
-        if (ok) std::snprintf(b, sizeof(b), "%d", fret);
-        else std::snprintf(b, sizeof(b), "?");
-        dl->AddText(ImVec2(xa + 3.0f, y - 8.0f), IM_COL32(250, 250, 255, 255), b);
-
-        if (hovered && mouse.x >= xa - 2.0f && mouse.x <= std::max(xb, xa + 6.0f) + 2.0f &&
-            mouse.y >= y - rowH * 0.4f && mouse.y <= y + rowH * 0.4f)
-            hitIdx = (int)i;
-    }
-
-    // ── 입력 ──
+    // ── 좌표 변환 ──
     const auto rowAt = [&](float my) {
         const int r = (int)((my - gridTop) / rowH);
         return (r < 0 || r >= ti.stringCount) ? -1 : r;
@@ -206,85 +209,209 @@ void drawStringTab(AppState& state) {
         return t < 0.0f ? 0u : (uint32_t)t;
     };
     const auto snap = [&](uint32_t t) { return (t + snapTicks / 2) / snapTicks * snapTicks; };
+    const float edgeW = 8.0f * S; // 오른쪽 끝 손잡이 폭
 
-    if (hovered) {
+    // ── 노트 그리기 + 히트 테스트 ──
+    const auto notes = seq::extractNotes(track);
+    const ImVec2 mouse = ImGui::GetIO().MousePos;
+    int hitIdx = -1, hitEdge = -1;
+
+    for (std::size_t i = 0; i < notes.size(); ++i) {
+        const auto& n = notes[i];
+        int s = 0, fret = 0;
+        const bool ok = tabAssign(tuning, n.note, s, fret);
+        const int r = ok ? (ti.stringCount - 1 - s) : 0;
+        const float y = gridTop + rowH * (float)r + rowH * 0.5f;
+        const float xa = x0 + (float)n.startTick * zoom;
+        const float xb = std::max(x0 + (float)n.endTick * zoom, xa + 10.0f * S);
+        const bool sel = g_ed.hasSel && sameSpan(g_ed.span, n);
+        const ImU32 col = !ok ? IM_COL32(220, 90, 80, 220)
+                              : (sel ? IM_COL32(255, 190, 90, 240) : IM_COL32(120, 140, 240, 220));
+        dl->AddRectFilled(ImVec2(xa, y - rowH * 0.34f), ImVec2(xb, y + rowH * 0.34f), col, 3.0f);
+        if (sel)
+            dl->AddRect(ImVec2(xa - 1.0f, y - rowH * 0.4f), ImVec2(xb + 1.0f, y + rowH * 0.4f),
+                        IM_COL32(255, 255, 255, 230), 3.0f, 0, 1.6f);
+        // 오른쪽 끝 손잡이 (길이 조절)
+        dl->AddRectFilled(ImVec2(xb - edgeW * 0.5f, y - rowH * 0.34f), ImVec2(xb, y + rowH * 0.34f),
+                          IM_COL32(255, 255, 255, sel ? 110 : 60), 2.0f);
+        char b[8];
+        std::snprintf(b, sizeof(b), ok ? "%d" : "?", fret);
+        dl->AddText(ImVec2(xa + 3.0f, y - 8.0f), IM_COL32(20, 20, 28, 255), b);
+
+        if (canvasHovered && mouse.y >= y - rowH * 0.42f && mouse.y <= y + rowH * 0.42f &&
+            mouse.x >= xa - 2.0f && mouse.x <= xb + 2.0f) {
+            hitIdx = (int)i;
+            hitEdge = (mouse.x >= xb - edgeW) ? 1 : 0;
+        }
+    }
+    if (canvasHovered && hitEdge == 1)
+        ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+
+    // ── 마우스 ──
+    if (canvasHovered) {
         const int r = rowAt(mouse.y);
-        // 프렛 조절 (휠)
+        // 프렛: 휠
         const float wheel = ImGui::GetIO().MouseWheel;
         if (hitIdx >= 0 && wheel != 0.0f) {
             const auto& n = notes[(std::size_t)hitIdx];
             int s = 0, f = 0;
             if (tabAssign(tuning, n.note, s, f)) {
-                const int nf = f + (wheel > 0 ? 1 : -1);
-                const int nn = tabNoteAt(tuning, s, nf);
+                const int nn = tabNoteAt(tuning, s, f + (wheel > 0 ? 1 : -1));
                 if (nn > 0) {
-                    state.snapshot();
-                    seq::removeNote(track, n);
-                    track.addNote(n.startTick, n.endTick - n.startTick, (uint8_t)nn, n.velocity);
-                    refreshPlaybackIfPlaying(state);
+                    replaceNote(state, track, n, n.startTick, n.endTick - n.startTick, nn, n.velocity);
+                    g_ed.hasSel = true;
+                    g_ed.span = {n.startTick, n.endTick, (uint8_t)nn, n.velocity};
                 }
             }
         }
-        // 드래그 시작 / 새 노트
         if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && r >= 0) {
             if (hitIdx >= 0) {
                 const auto& n = notes[(std::size_t)hitIdx];
                 int s = 0, f = 0;
                 tabAssign(tuning, n.note, s, f);
-                g_drag.active = true;
-                g_drag.span = n;
-                g_drag.fret = f;
-                g_drag.grabTick = tickAt(mouse.x) > n.startTick ? tickAt(mouse.x) - n.startTick : 0;
+                g_ed.mode = (hitEdge == 1) ? EditMode::Resize : EditMode::Move;
+                g_ed.span = n;
+                g_ed.fret = f;
+                g_ed.grabTick = tickAt(mouse.x) > n.startTick ? tickAt(mouse.x) - n.startTick : 0;
+                g_ed.hasSel = true;
+                g_ed.fretTyping = -1;
             } else {
                 const int s = ti.stringCount - 1 - r;
                 const int nn = tabNoteAt(tuning, s, 0); // 개방현
                 if (nn > 0) {
+                    const uint32_t st = snap(tickAt(mouse.x));
                     state.snapshot();
-                    track.addNote(snap(tickAt(mouse.x)), noteLen, (uint8_t)nn, 100);
+                    track.addNote(st, noteLen, (uint8_t)nn, 100);
                     refreshPlaybackIfPlaying(state);
+                    g_ed.hasSel = true;
+                    g_ed.span = {st, st + noteLen, (uint8_t)nn, 100};
+                    g_ed.fretTyping = -1;
                 }
             }
         }
-        // 삭제
         if (hitIdx >= 0 && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
             state.snapshot();
             seq::removeNote(track, notes[(std::size_t)hitIdx]);
             refreshPlaybackIfPlaying(state);
+            g_ed.hasSel = false;
         }
     }
 
-    // 드래그 진행/확정
-    if (g_drag.active) {
+    // ── 드래그 진행/확정 ──
+    if (g_ed.mode != EditMode::None) {
+        const uint32_t curTick = tickAt(mouse.x);
+        const uint32_t oldLen = g_ed.span.endTick - g_ed.span.startTick;
         if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
-            // 미리보기 선
-            const int r = rowAt(mouse.y);
-            if (r >= 0) {
-                const float y = gridTop + rowH * (float)r + rowH * 0.5f;
-                const float x = x0 + (float)snap(tickAt(mouse.x) > g_drag.grabTick
-                                                     ? tickAt(mouse.x) - g_drag.grabTick
-                                                     : 0) * zoom;
-                dl->AddRect(ImVec2(x, y - rowH * 0.36f),
-                            ImVec2(x + (float)(g_drag.span.endTick - g_drag.span.startTick) * zoom,
-                                   y + rowH * 0.36f),
+            // 미리보기
+            if (g_ed.mode == EditMode::Resize) {
+                int s = 0, f = 0;
+                tabAssign(tuning, g_ed.span.note, s, f);
+                const float y = gridTop + rowH * (float)(ti.stringCount - 1 - s) + rowH * 0.5f;
+                const uint32_t end = std::max(snap(curTick), g_ed.span.startTick + snapTicks);
+                dl->AddRect(ImVec2(x0 + (float)g_ed.span.startTick * zoom, y - rowH * 0.4f),
+                            ImVec2(x0 + (float)end * zoom, y + rowH * 0.4f),
                             IM_COL32(255, 230, 120, 255), 3.0f, 0, 2.0f);
-            }
-        } else {
-            const int r = rowAt(mouse.y);
-            if (r >= 0) {
-                const int s = ti.stringCount - 1 - r;
-                const int nn = tabNoteAt(tuning, s, g_drag.fret);
-                const uint32_t st = snap(tickAt(mouse.x) > g_drag.grabTick
-                                             ? tickAt(mouse.x) - g_drag.grabTick
-                                             : 0);
-                if (nn > 0 && (nn != g_drag.span.note || st != g_drag.span.startTick)) {
-                    state.snapshot();
-                    seq::removeNote(track, g_drag.span);
-                    track.addNote(st, g_drag.span.endTick - g_drag.span.startTick, (uint8_t)nn,
-                                  g_drag.span.velocity);
-                    refreshPlaybackIfPlaying(state);
+            } else {
+                const int r = rowAt(mouse.y);
+                if (r >= 0) {
+                    const float y = gridTop + rowH * (float)r + rowH * 0.5f;
+                    const uint32_t st = snap(curTick > g_ed.grabTick ? curTick - g_ed.grabTick : 0);
+                    dl->AddRect(ImVec2(x0 + (float)st * zoom, y - rowH * 0.4f),
+                                ImVec2(x0 + (float)(st + oldLen) * zoom, y + rowH * 0.4f),
+                                IM_COL32(255, 230, 120, 255), 3.0f, 0, 2.0f);
                 }
             }
-            g_drag.active = false;
+        } else {
+            if (g_ed.mode == EditMode::Resize) {
+                const uint32_t end = std::max(snap(curTick), g_ed.span.startTick + snapTicks);
+                const uint32_t len = end - g_ed.span.startTick;
+                if (len != oldLen) {
+                    replaceNote(state, track, g_ed.span, g_ed.span.startTick, len, g_ed.span.note,
+                                g_ed.span.velocity);
+                    g_ed.span.endTick = g_ed.span.startTick + len;
+                }
+            } else {
+                const int r = rowAt(mouse.y);
+                if (r >= 0) {
+                    const int s = ti.stringCount - 1 - r;
+                    const int nn = tabNoteAt(tuning, s, g_ed.fret);
+                    const uint32_t st = snap(curTick > g_ed.grabTick ? curTick - g_ed.grabTick : 0);
+                    if (nn > 0 && (nn != g_ed.span.note || st != g_ed.span.startTick)) {
+                        replaceNote(state, track, g_ed.span, st, oldLen, nn, g_ed.span.velocity);
+                        g_ed.span = {st, st + oldLen, (uint8_t)nn, g_ed.span.velocity};
+                    }
+                }
+            }
+            g_ed.mode = EditMode::None;
+        }
+    }
+
+    // ── 키보드 (고른 노트) ──
+    if (g_ed.hasSel && ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) &&
+        !ImGui::GetIO().WantTextInput) {
+        // 고른 노트가 아직 있는지 확인 (되돌리기 등으로 사라졌을 수 있다)
+        bool alive = false;
+        for (const auto& n : notes)
+            if (sameSpan(n, g_ed.span)) { alive = true; break; }
+        if (!alive) {
+            g_ed.hasSel = false;
+        } else {
+            int s = 0, f = 0;
+            tabAssign(tuning, g_ed.span.note, s, f);
+            const uint32_t len = g_ed.span.endTick - g_ed.span.startTick;
+            const auto setFret = [&](int nf) {
+                const int nn = tabNoteAt(tuning, s, nf);
+                if (nn <= 0) return;
+                replaceNote(state, track, g_ed.span, g_ed.span.startTick, len, nn, g_ed.span.velocity);
+                g_ed.span.note = (uint8_t)nn;
+            };
+            if (ImGui::IsKeyPressed(ImGuiKey_UpArrow, true)) { setFret(f + 1); g_ed.fretTyping = -1; }
+            if (ImGui::IsKeyPressed(ImGuiKey_DownArrow, true)) { setFret(f - 1); g_ed.fretTyping = -1; }
+            // 길이: Shift+좌우 = 늘이기/줄이기, 좌우 = 이동
+            const bool shift = ImGui::GetIO().KeyShift;
+            if (ImGui::IsKeyPressed(ImGuiKey_RightArrow, true)) {
+                if (shift)
+                    replaceNote(state, track, g_ed.span, g_ed.span.startTick, len + snapTicks,
+                                g_ed.span.note, g_ed.span.velocity),
+                        g_ed.span.endTick += snapTicks;
+                else {
+                    replaceNote(state, track, g_ed.span, g_ed.span.startTick + snapTicks, len,
+                                g_ed.span.note, g_ed.span.velocity);
+                    g_ed.span.startTick += snapTicks;
+                    g_ed.span.endTick += snapTicks;
+                }
+            }
+            if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow, true)) {
+                if (shift) {
+                    if (len > snapTicks) {
+                        replaceNote(state, track, g_ed.span, g_ed.span.startTick, len - snapTicks,
+                                    g_ed.span.note, g_ed.span.velocity);
+                        g_ed.span.endTick -= snapTicks;
+                    }
+                } else if (g_ed.span.startTick >= snapTicks) {
+                    replaceNote(state, track, g_ed.span, g_ed.span.startTick - snapTicks, len,
+                                g_ed.span.note, g_ed.span.velocity);
+                    g_ed.span.startTick -= snapTicks;
+                    g_ed.span.endTick -= snapTicks;
+                }
+            }
+            if (ImGui::IsKeyPressed(ImGuiKey_Delete, false) ||
+                ImGui::IsKeyPressed(ImGuiKey_Backspace, false)) {
+                state.snapshot();
+                seq::removeNote(track, g_ed.span);
+                refreshPlaybackIfPlaying(state);
+                g_ed.hasSel = false;
+            }
+            // 숫자 키로 프렛 직접 입력 (두 자리까지: 1 -> 12)
+            for (int d = 0; d <= 9 && g_ed.hasSel; ++d) {
+                const bool hit = ImGui::IsKeyPressed((ImGuiKey)(ImGuiKey_0 + d), false) ||
+                                 ImGui::IsKeyPressed((ImGuiKey)(ImGuiKey_Keypad0 + d), false);
+                if (!hit) continue;
+                const int two = (g_ed.fretTyping >= 0) ? g_ed.fretTyping * 10 + d : d;
+                const int nf = (two <= ti.maxFret) ? two : d;
+                setFret(nf);
+                g_ed.fretTyping = (nf <= 2 && nf > 0) ? nf : -1; // 1·2로 시작할 때만 두 자리 대기
+            }
         }
     }
 
