@@ -26,6 +26,8 @@ struct AppSettings {
     // 외부 제어 통로(네임드 파이프)를 열지. 같은 PC의 도구(MCP 서버 등)가
     // 재생/정지·프로젝트 다시 불러오기를 시킬 수 있다. 끄면 통로를 만들지 않는다.
     bool controlPipe = true;
+    // 마지막으로 "업데이트 내용"을 본 버전. 비어 있으면 아직 본 적 없다.
+    std::string lastSeenVersion;
 };
 
 bool saveSettings(const AppSettings& s, const std::filesystem::path& path);

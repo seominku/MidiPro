@@ -385,6 +385,11 @@ struct AppState {
     // 시작할 때만 반영된다 — 끄고 켜려면 앱을 다시 실행해야 한다.
     bool controlPipeOn = true;
 
+    // 업데이트 내용 창. lastSeenVersion은 "이 버전 알림을 봤다"는 표시로
+    // settings.ini에 저장된다 — 새 버전으로 처음 켤 때만 창이 뜬다.
+    bool showWhatsNew = false;
+    std::string lastSeenVersion;
+
     // ---- UI 테마 (개인설정 > 테마) ----
     ThemeParams theme;              // 현재 테마 파라미터 (시작 시 파일에서 복원)
     bool showStyleEditor = false;   // 고급 스타일 편집기(ImGui 내장) 창

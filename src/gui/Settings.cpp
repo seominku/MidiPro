@@ -31,6 +31,7 @@ bool saveSettings(const AppSettings& s, const std::filesystem::path& path) {
     f << "soft_thru " << (s.softThru ? 1 : 0) << '\n';
     f << "start_screen " << (s.startScreenOnLaunch ? 1 : 0) << '\n';
     f << "control_pipe " << (s.controlPipe ? 1 : 0) << '\n';
+    if (!s.lastSeenVersion.empty()) f << "last_seen_version " << s.lastSeenVersion << '\n';
     return f.good();
 }
 
@@ -51,6 +52,7 @@ bool loadSettings(AppSettings& s, const std::filesystem::path& path) {
         else if (key == "soft_thru") { int v = 1; ls >> v; s.softThru = v != 0; }
         else if (key == "start_screen") { int v = 1; ls >> v; s.startScreenOnLaunch = v != 0; }
         else if (key == "control_pipe") { int v = 1; ls >> v; s.controlPipe = v != 0; }
+        else if (key == "last_seen_version") s.lastSeenVersion = restOfLine(ls);
         // 모르는 키는 넘어간다 (앞뒤 버전 호환)
     }
     return true;

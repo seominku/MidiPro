@@ -54,6 +54,8 @@ cl %CFLAGS% %INC% tests\test_drumclassify.cpp /Fe:build\MidiProDrumTests.exe /Fo
 if errorlevel 1 ( echo [ERROR] drum classify test build failed & exit /b 1 )
 cl %CFLAGS% %INC% tests\test_vstpreset.cpp src\vst\VstPreset.cpp /Fe:build\MidiProPresetTests.exe /Fo:build\
 if errorlevel 1 ( echo [ERROR] vst preset test build failed & exit /b 1 )
+cl %CFLAGS% %INC% tests\test_releasenotes.cpp /Fe:build\MidiProNotesTests.exe /Fo:build\
+if errorlevel 1 ( echo [ERROR] release notes test build failed & exit /b 1 )
 build\MidiProTests.exe
 if errorlevel 1 ( echo [ERROR] midi tests failed & exit /b 1 )
 build\MidiProSeqTests.exe
@@ -72,6 +74,8 @@ build\MidiProDrumTests.exe
 if errorlevel 1 ( echo [ERROR] drum classify tests failed & exit /b 1 )
 build\MidiProPresetTests.exe
 if errorlevel 1 ( echo [ERROR] vst preset tests failed & exit /b 1 )
+build\MidiProNotesTests.exe
+if errorlevel 1 ( echo [ERROR] release notes tests failed & exit /b 1 )
 
 echo [OK] build\MidiPro.exe
 endlocal

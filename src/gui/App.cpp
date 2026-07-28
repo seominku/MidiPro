@@ -12,6 +12,7 @@
 #include "gui/Settings.h"
 #include "gui/UiSkin.h"
 #include "gui/Panels.h"
+#include "gui/ReleaseNotes.h"
 
 #include "audio/AudioClip.h"
 #include "audio/BuiltinFx.h"
@@ -1300,6 +1301,9 @@ int App::run() {
     m_state.startScreenOnLaunch = settings.startScreenOnLaunch;
     m_state.showStartScreen = settings.startScreenOnLaunch; // 켜기로 돼 있으면 시작 시 표시
     m_state.controlPipeOn = settings.controlPipe;
+    // 새 버전으로 처음 켰으면 업데이트 내용을 보여준다 (시작 화면보다 먼저)
+    m_state.lastSeenVersion = settings.lastSeenVersion;
+    m_state.showWhatsNew = hasNewNotes(m_state.lastSeenVersion.c_str());
     // 외부 제어 통로. 두 번째 인스턴스면 조용히 실패하고 통로 없이 돈다.
     if (m_state.controlPipeOn)
         m_control.start([this](const std::string& line) { return handleControlCommand(line); });
@@ -1685,8 +1689,11 @@ int App::run() {
         themed(kWinVst, &drawVst);
         themed(kWinGuitarHelper, &drawGuitarHelper);
         themed(kWinMonitor, &drawMonitor);
-        drawBrowser(m_state);     // 좌측 브라우저 (악기·이펙트·최근)
-        drawStartScreen(m_state); // 모든 패널 위에 겹치는 시작 화면
+        drawBrowser(m_state); // 좌측 브라우저 (악기·이펙트·최근)
+        // 업데이트 내용이 떠 있는 동안은 시작 화면을 미룬다 — 시작 화면이
+        // 모달이라 먼저 뜨면 뒤에 깔린 이 창을 누를 수 없다.
+        drawWhatsNew(m_state);
+        if (!m_state.showWhatsNew) drawStartScreen(m_state); // 모든 패널 위에 겹치는 시작 화면
         if (scrollReqAtFrameStart) m_state.scrollToPlayhead = false; // 모든 뷰가 반영한 뒤 해제
 
         // 시작 화면 '새 곡' / '프로젝트 열기' 요청 처리 (메뉴의 새 곡과 같은 동작)
@@ -2153,6 +2160,9 @@ int App::run() {
         out.softThru = m_state.softThru;
         out.startScreenOnLaunch = m_state.startScreenOnLaunch;
         out.controlPipe = m_state.controlPipeOn;
+        // 창을 닫지 않고 앱을 끈 경우에도 "이 버전은 알려줬다"로 남긴다.
+        // 안 그러면 켤 때마다 같은 알림이 다시 뜬다.
+        out.lastSeenVersion = kAppVersion;
         if (m_state.input) {
             const auto ports = m_state.input->listPorts();
             out.midiInAutoOpen = m_state.input->isOpen();

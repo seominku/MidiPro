@@ -4,6 +4,7 @@
 
 #include "gui/Panels.h"
 #include "gui/PanelsInternal.h" // 분리된 패널 파일들과 공유하는 위젯
+#include "gui/ReleaseNotes.h"   // 버전 문자열 + 업데이트 내용
 
 #include "audio/SynthPreset.h"
 #include "audio/BuiltinFx.h" // 브라우저의 내장 이펙트 추가 (kEq/kDelay/...)
@@ -2037,6 +2038,66 @@ void drawPerf(AppState& state) {
 }
 
 // ---------------------------------------------------------
+// 업데이트 내용: 새 버전으로 처음 켤 때 무엇이 바뀌었는지 보여준다.
+// (도움말 > 업데이트 내용 으로 언제든 다시 열 수 있다)
+//
+// 시작 화면과 겹치지 않게 App이 순서를 잡는다 — 이 창이 떠 있는 동안은
+// 시작 화면을 열지 않는다 (모달이 두 개 겹치면 아래 것을 못 누른다).
+// ---------------------------------------------------------
+void drawWhatsNew(AppState& state) {
+    if (!state.showWhatsNew) return;
+
+    const ImGuiViewport* vp = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(vp->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(uiVec(560, 460), ImGuiCond_Appearing);
+    if (!ImGui::Begin("업데이트 내용", &state.showWhatsNew,
+                      ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoDocking)) {
+        ImGui::End();
+        return;
+    }
+
+    sectionHeader("MidiPro가 새로워졌습니다");
+    ImGui::TextDisabled("현재 버전 %s", kAppVersion);
+    ImGui::Spacing();
+
+    // 지난번에 본 버전 이후의 항목만 (처음 실행이면 최신 하나만)
+    const std::size_t show = newNoteCount(state.lastSeenVersion.c_str());
+    std::size_t total = 0;
+    const ReleaseNote* all = releaseNotes(total);
+
+    ImGui::BeginChild("##wnbody", uiVec(0, -44), ImGuiChildFlags_Borders);
+    if (show == 0) {
+        ImGui::TextDisabled("새로 추가된 내용이 없습니다.");
+    }
+    for (std::size_t i = 0; i < show && i < total; ++i) {
+        if (i > 0) ImGui::Spacing();
+        if (uiHeaderFont()) ImGui::PushFont(uiHeaderFont());
+        ImGui::TextUnformatted(all[i].version);
+        if (uiHeaderFont()) ImGui::PopFont();
+        ImGui::Separator();
+        for (const char* const* p = all[i].items; *p; ++p) {
+            ImGui::Bullet();
+            ImGui::SameLine();
+            // 창 폭에 맞춰 줄바꿈 (문장이 길다)
+            ImGui::PushTextWrapPos(ImGui::GetContentRegionMax().x);
+            ImGui::TextUnformatted(*p);
+            ImGui::PopTextWrapPos();
+        }
+        ImGui::Spacing();
+    }
+    ImGui::EndChild();
+
+    ImGui::Spacing();
+    if (ImGui::Button("닫기", uiVec(120, 0))) state.showWhatsNew = false;
+    ImGui::SameLine();
+    ImGui::TextDisabled("도움말 > 업데이트 내용 에서 다시 볼 수 있습니다");
+    ImGui::End();
+
+    // 닫는 순간 "이 버전을 봤다"고 기록한다 (설정에 저장돼 다음엔 안 뜬다)
+    if (!state.showWhatsNew) state.lastSeenVersion = kAppVersion;
+}
+
+// ---------------------------------------------------------
 // 도움말: 단축키 목록 (F1 또는 메뉴 > 도움말 > 단축키)
 // ---------------------------------------------------------
 static void drawHelpWindow(AppState& state) {
@@ -2410,6 +2471,7 @@ void drawMenuBar(AppState& state, bool& openRequested, bool& saveRequested) {
         }
         if (ImGui::BeginMenu("도움말")) {
             ImGui::MenuItem("단축키", "F1", &state.showHelp);
+            ImGui::MenuItem("업데이트 내용", nullptr, &state.showWhatsNew);
             ImGui::MenuItem("MidiPro 정보", nullptr, &state.showAbout);
             ImGui::EndMenu();
         }
@@ -2471,7 +2533,7 @@ void drawMenuBar(AppState& state, bool& openRequested, bool& saveRequested) {
         ImGui::SetNextWindowSize(ImVec2(360, 0), ImGuiCond_FirstUseEver);
         if (ImGui::Begin("MidiPro 정보", &state.showAbout,
                          ImGuiWindowFlags_AlwaysAutoResize)) {
-            ImGui::TextUnformatted("MidiPro 1.3.4");
+            ImGui::Text("MidiPro %s", kAppVersion);
             ImGui::TextDisabled("MIDI 시퀀서 + 오디오 녹음 + VST3 호스트");
             ImGui::Text("빌드: %s", __DATE__);
             ImGui::Separator();
