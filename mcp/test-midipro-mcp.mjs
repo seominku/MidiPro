@@ -11,7 +11,7 @@
 // =============================================================
 
 import { spawn } from 'node:child_process';
-import { mkdtempSync, readFileSync, writeFileSync, existsSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, existsSync, rmSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -27,8 +27,11 @@ const check = (cond, label) => {
 
 // --- 서버와 대화하는 최소 클라이언트 -------------------------------
 class Client {
-    constructor() {
-        this.proc = spawn(process.execPath, [SERVER], { stdio: ['pipe', 'pipe', 'pipe'] });
+    constructor(env) {
+        this.proc = spawn(process.execPath, [SERVER], {
+            stdio: ['pipe', 'pipe', 'pipe'],
+            env: env ? { ...process.env, ...env } : process.env,
+        });
         this.buf = '';
         this.pending = new Map();
         this.nextId = 1;
@@ -88,7 +91,7 @@ try {
 
     const list = await c.request('tools/list', {});
     const names = (list.result?.tools ?? []).map((t) => t.name);
-    check(names.length === 11, `도구 11개를 노출한다 (실제 ${names.length}개)`);
+    check(names.length === 15, `도구 15개를 노출한다 (실제 ${names.length}개)`);
     check(names.every((n) => n.startsWith('midipro_')), '도구 이름이 모두 midipro_ 로 시작한다');
     check((list.result?.tools ?? []).every((t) => t.inputSchema?.type === 'object'),
           '모든 도구가 object 스키마를 갖는다');
@@ -257,6 +260,178 @@ try {
     r = await c.call('midipro_add_notes', { path: proj, track: 0, notes: [] });
     check(r.isError, '빈 노트 배열을 거부한다');
 
+    console.log('--- 드럼 킷 (샘플 자동 배정) ---');
+    // 실제 라이브러리에 기대지 않도록, 아카이브 구조를 흉내낸 가짜 폴더를 만들어
+    // MIDIPRO_DRUMLIB로 가리킨다 — 분류/배정 로직만 검사한다.
+    const lib = path.join(dir, 'DrumLib', 'Archive 1');
+    const mk = (kit, folder, names) => {
+        const d = path.join(lib, kit, folder);
+        mkdirSync(d, { recursive: true });
+        for (const n of names) writeFileSync(path.join(d, n), 'RIFF');
+    };
+    mk('TR-909', 'Bassdrums', ['Bassdrum-01.wav', 'Bassdrum-02.wav']);
+    mk('TR-909', 'Snares', ['Snare-01.wav', 'Snare-02.wav']);
+    mk('TR-909', 'Hats', ['ClosedHat-01.wav', 'OpenHat-01.wav']);
+    mk('TR-909', 'Toms', ['Tom-01.wav', 'Tom-02.wav', 'Tom-03.wav', 'Tom-04.wav']);
+    mk('TR-909', 'Cymbals', ['Crash-01.wav', 'Ride-01.wav']);
+    mk('TR-909', 'Perc', ['Clap-01.wav']);
+    mk('TR-909', 'Perc2', ['Rim-01.wav']);     // 스네어가 있으니 38번엔 안 걸려야 한다
+    mk('TR-909', 'Bass', ['Bottoms Up 01.wav']); // "bottoms"가 tom으로 잡히면 안 된다
+    mk('Tiny Box', 'Kick', ['Kick-01.wav']);   // 킥만 있는 빈약한 킷
+    // 계열이 섞인 킷: Acoustic 계열로 통일되어야 한다
+    mk('Producer', 'All', [
+        'Acoustic-Kick-Ac2 Kik.wav', 'Acoustic-Snare-Ac2 Snr.wav',
+        'Acoustic-Tom-Ac2 Tom 1.wav', 'Acoustic-Tom-Ac2 Tom 2.wav', 'Acoustic-Tom-Ac2 Tom 3.wav',
+        'Acoustic-Cymbal-Ac2 Crash.wav', 'Acoustic-Cymbal-Ac2 Ride.wav',
+        'Acoustic-Hat-Ac2 Closed.wav', 'Acoustic-Hat-Ac2 Open.wav',
+        'Urban-Tom-PD6 Tom.wav', 'HipHop-Bass-MSXII Bottoms Up.wav',
+    ]);
+
+    // 서버를 라이브러리 환경변수와 함께 새로 띄운다
+    const c2 = new Client({ MIDIPRO_DRUMLIB: path.join(dir, 'DrumLib') });
+    await c2.request('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 't', version: '1' } });
+
+    const dkit = path.join(dir, 'kit.midipro');
+    await c2.call('midipro_create_project', { path: dkit, tracks: [{ name: '드럼', type: 'drum' }] });
+    await c2.call('midipro_add_drums', {
+        path: dkit, track: '드럼',
+        pattern: { kick: 'x---x---', snare: '----x---', hat: 'x-x-x-x-', openhat: '-------x',
+                   crash: 'x-------', ride: '--x-----', tom1: '------x-', tom2: '-----x--', tom3: '----x---' },
+    });
+
+    r = await c2.call('midipro_list_drumkits', {});
+    const kits = JSON.parse(r.text);
+    check(!r.isError && kits.kitCount === 3, `킷 3개를 찾는다 (${kits.kitCount})`);
+    check(kits.kits[0].has.includes('킥') && kits.kits[0].has.includes('오픈 햇'),
+          '킷이 가진 악기를 분류해 보여준다');
+
+    r = await c2.call('midipro_set_drumkit', { path: dkit, dryRun: true });
+    check(!r.isError && /미리보기/.test(r.text), 'dryRun이 동작한다');
+    check(!readFileSync(dkit, 'utf8').includes('drumsample'), 'dryRun은 파일을 고치지 않는다');
+
+    // 오탐/우선순위 검사 (자동 배정의 핵심 품질)
+    r = await c2.call('midipro_set_drumkit', { path: dkit, kit: 'TR-909', dryRun: true });
+    check(/38 스네어 .*-> Snare-01\.wav/.test(r.text),
+          '스네어가 있으면 38번에 림이 아니라 스네어가 걸린다');
+    check(!/Bottoms Up/.test(r.text),
+          '"Bottoms Up"이 탐으로 오탐되지 않는다 (낱말 단위 매칭)');
+    r = await c2.call('midipro_set_drumkit', { path: dkit, kit: 'TR-909', notes: [37], dryRun: true });
+    check(/37 림 .*-> Rim-01\.wav/.test(r.text), '37번(림)에는 림 샘플이 걸린다');
+
+    // 약어 인식 + 같은 파일 중복 방지: "Rd"(ride)만 있고 "ride"라는 낱말이 없는 킷
+    mk('Abbrev', 'Cym', ['Acoustic-Cymbal-Ac2 Crsh 1.wav', 'Acoustic-Cymbal-Ac2 Rd Bow.wav',
+                         'Acoustic-Kick-Ac2 Kik.wav', 'Acoustic-Snare-Ac2 Sn.wav']);
+    mk('Abbrev', 'Misc', ['Acoustic-Perc-3rd Take Shaker.wav']); // "3rd"가 ride로 잡히면 안 된다
+    const c3 = new Client({ MIDIPRO_DRUMLIB: path.join(dir, 'DrumLib') });
+    await c3.request('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 't', version: '1' } });
+    const abbrev = path.join(dir, 'abbrev.midipro');
+    await c3.call('midipro_create_project', { path: abbrev, tracks: [{ name: '드럼', type: 'drum' }] });
+    await c3.call('midipro_add_drums', {
+        path: abbrev, track: '드럼',
+        pattern: { kick: 'x---', snare: '--x-', crash: 'x---', ride: '--x-' },
+    });
+    r = await c3.call('midipro_set_drumkit', { path: abbrev, kit: 'Abbrev', dryRun: true });
+    check(/36 킥 .*Kik\.wav/.test(r.text), '"Kik" 약어를 킥으로 알아본다');
+    check(/38 스네어 .*Sn\.wav/.test(r.text), '"Sn" 약어를 스네어로 알아본다');
+    check(/51 라이드 .*Rd Bow\.wav/.test(r.text), '"Rd" 약어를 라이드로 알아본다');
+    check(/49 크래시 .*Crsh 1\.wav/.test(r.text), '"Crsh" 약어를 크래시로');
+    check(!/3rd Take/.test(r.text), '"3rd"가 라이드로 오탐되지 않는다 (숫자 경계)');
+    c3.close();
+
+    r = await c2.call('midipro_set_drumkit', { path: dkit, kit: 'Producer', dryRun: true });
+    check(/Acoustic 계열/.test(r.text), '계열이 섞인 킷에서 커버리지 넓은 계열을 고른다');
+    check(!/Urban-Tom|MSXII/.test(r.text), '다른 계열 샘플이 섞이지 않는다');
+    check(/49 크래시 .*Crash/.test(r.text) && /51 라이드 .*Ride/.test(r.text),
+          '크래시와 라이드가 서로 다른 샘플로 걸린다 (막연한 cymbal보다 이름이 정확한 쪽 우선)');
+
+    r = await c2.call('midipro_set_drumkit', { path: dkit, kit: 'Producer', family: 'Urban', dryRun: true });
+    check(!r.isError && /Urban 계열/.test(r.text), 'family로 계열을 직접 고를 수 있다');
+    r = await c2.call('midipro_set_drumkit', { path: dkit, kit: 'Producer', family: '없는계열' });
+    check(r.isError && /있는 계열:/.test(r.text), '없는 계열은 있는 목록을 알려준다');
+
+    r = await c2.call('midipro_set_drumkit', { path: dkit, kit: 'TR-909' });
+    check(!r.isError, '드럼 킷을 배정한다');
+    const kt = readFileSync(dkit, 'utf8');
+    check(/^drumsample 36 .*Bassdrum-01\.wav$/m.test(kt), '킥(36)에 킥 샘플이 걸린다');
+    check(/^drumsample 38 .*Snare-01\.wav$/m.test(kt), '스네어(38)에 스네어 샘플');
+    check(/^drumsample 42 .*ClosedHat-01\.wav$/m.test(kt), '클로즈드 햇(42)에 closed 샘플');
+    check(/^drumsample 46 .*OpenHat-01\.wav$/m.test(kt), '오픈 햇(46)에 open 샘플');
+    check(/^drumsample 49 .*Crash-01\.wav$/m.test(kt), '크래시(49)에 크래시');
+    check(/^drumsample 51 .*Ride-01\.wav$/m.test(kt), '라이드(51)에 라이드');
+    // 탐 3개(45/47/50)는 서로 다른 파일이어야 한다
+    const toms = [...kt.matchAll(/^drumsample (4[57]|50) .*(Tom-\d+)\.wav$/gm)].map((m) => m[2]);
+    check(toms.length === 3 && new Set(toms).size === 3,
+          `탐 3개에 서로 다른 샘플이 걸린다 (${toms.join(', ')})`);
+    check(kt.indexOf('drumsample') < kt.indexOf('[song]'), 'drumsample 줄이 헤더(=[song] 앞)에 들어간다');
+
+    r = await c2.call('midipro_set_drumkit', { path: dkit, kit: 'Tiny' });
+    check(!r.isError && /킥/.test(r.text), '킷을 지정할 수 있다');
+    check(/못 찾아 내장 신디로 남는 노트/.test(r.text), '없는 악기는 내장 신디로 남는다고 알려준다');
+    const kt2 = readFileSync(dkit, 'utf8');
+    check((kt2.match(/^drumsample /gm) ?? []).length === 1, '다시 배정하면 이전 배정을 걷어낸다');
+
+    r = await c2.call('midipro_set_drumkit', { path: dkit, kit: '없는킷999' });
+    check(r.isError && /맞는 드럼머신이 없습니다/.test(r.text), '없는 킷 이름을 잡는다');
+    const nodrum = path.join(dir, 'nodrum.midipro');
+    await c2.call('midipro_create_project', { path: nodrum, tracks: [{ name: '피아노' }] });
+    r = await c2.call('midipro_set_drumkit', { path: nodrum });
+    check(r.isError && /드럼 트랙/.test(r.text), '드럼 노트가 없으면 알려준다');
+    c2.close();
+
+    console.log('--- 플러그인 (악기/이펙트) ---');
+    // 내장 이펙트는 스캔된 VST가 없어도 항상 되므로 그걸로 검사한다.
+    r = await c.call('midipro_add_effect', { path: proj, track: '피아노', effect: 'delay' });
+    check(!r.isError, '내장 이펙트를 추가한다');
+    text = readFileSync(proj, 'utf8');
+    check(/^tplugin 0 1 -1 딜레이\tbuiltin:delay$/m.test(text),
+          '내장 이펙트가 앱과 같은 형식으로 기록된다 (classIndex -1, builtin: 경로)');
+    r = await c.call('midipro_add_effect', { path: proj, track: '피아노', effect: '리버브' });
+    check(!r.isError && /딜레이 -> 리버브/.test(r.text), '체인 뒤에 순서대로 붙는다');
+    r = await c.call('midipro_add_effect', { path: proj, track: '피아노', effect: '컴프' });
+    check(!r.isError && /^tplugin 0 1 -1 컴프레서\tbuiltin:comp$/m.test(readFileSync(proj, 'utf8')),
+          '한글 별칭(컴프)도 받는다');
+
+    r = await c.call('midipro_add_effect', { path: proj, track: '피아노', effect: '없는이펙트123' });
+    check(r.isError, '모르는 이펙트는 오류를 준다');
+    r = await c.call('midipro_set_instrument', { path: proj, track: 0, plugin: 'C:\\없는\\경로.vst3' });
+    check(r.isError && /찾을 수 없습니다/.test(r.text), '없는 .vst3 경로를 잡는다');
+
+    // 악기: 가짜 .vst3 경로를 만들어 형식만 검사한다 (진짜 로드는 앱이 한다)
+    const fakeVst = path.join(dir, 'FakeSynth.vst3');
+    writeFileSync(fakeVst, 'x');
+    r = await c.call('midipro_set_instrument', { path: proj, track: '피아노', plugin: fakeVst });
+    check(!r.isError, '악기를 얹는다');
+    text = readFileSync(proj, 'utf8');
+    check(new RegExp(`^tplugin 1 1 -1 FakeSynth\t${fakeVst.replace(/[\\.]/g, '\\$&')}$`, 'm').test(text),
+          '악기가 tplugin 1 ... 형식으로 기록된다');
+    const fake2 = path.join(dir, 'Other.vst3');
+    writeFileSync(fake2, 'x');
+    r = await c.call('midipro_set_instrument', { path: proj, track: '피아노', plugin: fake2 });
+    check(!r.isError && /기존 악기 교체/.test(r.text), '악기는 트랙당 1개라 교체된다');
+    text = readFileSync(proj, 'utf8');
+    check((text.match(/^tplugin 1 /gm) ?? []).length === 1, '악기 줄이 하나만 남는다');
+    check((text.match(/^tplugin 0 /gm) ?? []).length === 3, '이펙트 3개는 그대로 남는다');
+
+    // tplugin 줄이 taudio 블록 앞에 들어가는지 (tgain이 taudio에 붙어 있어야 한다)
+    const withAudio = path.join(dir, 'audio.midipro');
+    writeFileSync(withAudio, [
+        'midipro_project 1', '[song]', 'bpm 120', 'ppqn 480',
+        'track 0 0 Aud', 'tvol 1 0 1 0', 'tinch 0',
+        'taudio track0_0.wav 0 1 0 0 보컬', 'tgain 0.9', '[end]',
+    ].join('\n') + '\n', 'utf8');
+    r = await c.call('midipro_add_effect', { path: withAudio, track: 0, effect: 'eq' });
+    const al = readFileSync(withAudio, 'utf8').split('\n');
+    check(al.indexOf('tplugin 0 1 -1 EQ\tbuiltin:eq') < al.findIndex((L) => L.startsWith('taudio ')),
+          'tplugin이 taudio 앞에 들어간다');
+    check(al.findIndex((L) => L.startsWith('tgain ')) - al.findIndex((L) => L.startsWith('taudio ')) === 1,
+          'taudio 바로 뒤에 tgain이 붙어 있다 (오디오 클립 정보 보존)');
+
+    r = await c.call('midipro_read_project', { path: proj });
+    const pj = JSON.parse(r.text);
+    check(pj.tracks[0].plugins.length === 4, '읽기가 플러그인 4개를 보고한다');
+    check(pj.tracks[0].plugins.filter((p) => p.kind === 'instrument').length === 1,
+          '그중 악기가 1개');
+
     console.log('--- MIDI 내보내기/가져오기 ---');
     const mid = path.join(dir, 'out.mid');
     r = await c.call('midipro_export_midi', { path: proj, midiPath: mid });
@@ -348,6 +523,78 @@ try {
     writeFileSync(fake, 'not a midi file at all, really');
     r = await c.call('midipro_import_midi', { path: rt, midiPath: fake });
     check(r.isError && /MIDI 파일이 아닙니다/.test(r.text), 'MThd 없는 파일을 거부한다');
+
+    console.log('--- 앱이 열고 있는 프로젝트 보호 ---');
+    // 데이터 폴더를 가짜로 잡아 session.lock / recent.txt 를 직접 만든다.
+    // (실제 MidiPro 실행 여부에 좌우되지 않게 — 테스트는 결정적이어야 한다)
+    const fakeData = path.join(dir, 'AppData');
+    mkdirSync(fakeData, { recursive: true });
+    const gproj = path.join(dir, 'guard.midipro');
+
+    const cg = new Client({ MIDIPRO_DATA_DIR: fakeData });
+    await cg.request('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'g', version: '1' } });
+    await cg.call('midipro_create_project', { path: gproj, tracks: [{ name: 'T' }] });
+
+    // 세션 없음 -> 아무 경고 없이 그냥 된다
+    r = await cg.call('midipro_add_notes', { path: gproj, track: 0, notes: [{ pitch: 'C4', start: 0 }] });
+    check(!r.isError && !/경고|주의/.test(r.text), '세션이 없으면 조용히 편집된다');
+
+    // 세션 있음 + 최근 목록 맨 위가 다른 파일 -> 경고만
+    writeFileSync(path.join(fakeData, 'session.lock'), 'running');
+    writeFileSync(path.join(fakeData, 'recent.txt'), path.join(dir, 'other.midipro') + '\n', 'utf8');
+    r = await cg.call('midipro_add_notes', { path: gproj, track: 0, notes: [{ pitch: 'D4', start: 1 }] });
+    check(!r.isError && /\[경고\] MidiPro가 실행 중/.test(r.text),
+          '앱이 켜져 있고 다른 프로젝트면 경고만 붙고 편집은 된다');
+    check(/노트 1개를 찍었습니다/.test(r.text), '경고와 함께 원래 결과도 온다');
+
+    // 세션 있음 + 최근 목록 맨 위가 이 파일 -> 차단
+    writeFileSync(path.join(fakeData, 'recent.txt'), gproj + '\n', 'utf8');
+    const before2 = readFileSync(gproj, 'utf8');
+    r = await cg.call('midipro_add_notes', { path: gproj, track: 0, notes: [{ pitch: 'E4', start: 2 }] });
+    check(r.isError && /열고 있는 것 같습니다/.test(r.text), '앱이 그 프로젝트를 열고 있으면 막는다');
+    check(readFileSync(gproj, 'utf8') === before2, '막혔을 때 파일이 그대로다');
+    check(/force: true/.test(r.text), '넘기는 방법을 알려준다');
+
+    // force로 강행
+    r = await cg.call('midipro_add_notes', { path: gproj, track: 0, notes: [{ pitch: 'E4', start: 2 }], force: true });
+    check(!r.isError && /\[주의\]/.test(r.text), 'force면 주의 문구와 함께 진행한다');
+    check(readFileSync(gproj, 'utf8') !== before2, 'force면 실제로 고쳐진다');
+
+    // 다른 변경 도구도 같은 보호를 받는다 (한 곳에서 거르는지 확인)
+    for (const [tool, extra] of [
+        ['midipro_set_tempo', { bpm: 100 }],
+        ['midipro_add_track', { name: '새트랙' }],
+        ['midipro_add_chords', { track: 0, chords: ['C'] }],
+        ['midipro_add_drums', { track: 0, pattern: { kick: 'x' } }],
+    ]) {
+        r = await cg.call(tool, { path: gproj, ...extra });
+        check(r.isError && /열고 있는 것 같습니다/.test(r.text), `${tool}도 보호된다`);
+    }
+    // 읽기 도구는 막히지 않는다
+    r = await cg.call('midipro_read_project', { path: gproj });
+    check(!r.isError, '읽기는 세션이 있어도 된다');
+
+    r = await cg.call('midipro_status', {});
+    const stg = JSON.parse(r.text);
+    check(stg.sessionLive === true && stg.likelyOpenProject === gproj,
+          'status가 열려 있는 프로젝트를 알려준다');
+
+    // 스키마에 force가 붙어 있는지
+    const list2 = await cg.request('tools/list', {});
+    const mut = (list2.result?.tools ?? []).filter((t) =>
+        ['midipro_add_notes', 'midipro_set_drumkit', 'midipro_add_effect', 'midipro_import_midi'].includes(t.name));
+    check(mut.length === 4 && mut.every((t) => t.inputSchema.properties.force),
+          '변경 도구 스키마에 force가 붙는다');
+    const ro = (list2.result?.tools ?? []).find((t) => t.name === 'midipro_read_project');
+    check(!ro.inputSchema.properties.force, '읽기 도구엔 force가 없다');
+
+    // 환경변수로 끌 수 있다
+    const cOff = new Client({ MIDIPRO_DATA_DIR: fakeData, MIDIPRO_OPEN_GUARD: 'off' });
+    await cOff.request('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'o', version: '1' } });
+    r = await cOff.call('midipro_set_tempo', { path: gproj, bpm: 111 });
+    check(!r.isError && !/경고|주의/.test(r.text), 'MIDIPRO_OPEN_GUARD=off로 끌 수 있다');
+    cOff.close();
+    cg.close();
 
     console.log('--- 상태 ---');
     r = await c.call('midipro_status', {});

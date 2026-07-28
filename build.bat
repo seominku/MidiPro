@@ -50,6 +50,8 @@ cl %CFLAGS% %INC% tests\test_ump.cpp src\midi2\Ump.cpp /Fe:build\MidiProUmpTests
 if errorlevel 1 ( echo [ERROR] ump test build failed & exit /b 1 )
 cl %CFLAGS% %INC% tests\test_project.cpp src\project\Project.cpp src\audio\SynthPreset.cpp src\audio\WavFile.cpp src\audio\AudioClip.cpp src\audio\Mp3Writer.cpp src\mapping\MidiMap.cpp src\sequencer\Track.cpp src\sequencer\Song.cpp src\sequencer\TimeBase.cpp ole32.lib mfplat.lib mfreadwrite.lib mfuuid.lib windowscodecs.lib dbghelp.lib /Fe:build\MidiProProjectTests.exe /Fo:build\
 if errorlevel 1 ( echo [ERROR] project test build failed & exit /b 1 )
+cl %CFLAGS% %INC% tests\test_drumclassify.cpp /Fe:build\MidiProDrumTests.exe /Fo:build\
+if errorlevel 1 ( echo [ERROR] drum classify test build failed & exit /b 1 )
 build\MidiProTests.exe
 if errorlevel 1 ( echo [ERROR] midi tests failed & exit /b 1 )
 build\MidiProSeqTests.exe
@@ -64,6 +66,8 @@ build\MidiProUmpTests.exe
 if errorlevel 1 ( echo [ERROR] ump tests failed & exit /b 1 )
 build\MidiProProjectTests.exe
 if errorlevel 1 ( echo [ERROR] project tests failed & exit /b 1 )
+build\MidiProDrumTests.exe
+if errorlevel 1 ( echo [ERROR] drum classify tests failed & exit /b 1 )
 
 echo [OK] build\MidiPro.exe
 endlocal

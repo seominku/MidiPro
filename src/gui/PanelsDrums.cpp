@@ -8,6 +8,7 @@
 // 완전히 호환된다.
 // =============================================================
 
+#include "gui/DrumClassify.h"
 #include "gui/Panels.h"
 #include "gui/PanelsInternal.h"
 
@@ -58,47 +59,13 @@ int rowForNote(uint8_t note) {
 // 드럼 샘플 라이브러리 기본 위치 (실행 폴더 기준)
 constexpr const char* kDrumLibDir = "src/Drum";
 
-// ---- 악기별 분류: 경로/파일 이름의 키워드로 버킷을 매긴다 (비트마스크) ----
-enum : uint16_t {
-    kBKick = 1 << 0,
-    kBSnare = 1 << 1,
-    kBClap = 1 << 2,
-    kBHatClosed = 1 << 3,
-    kBHatOpen = 1 << 4,
-    kBTom = 1 << 5,
-    kBCrash = 1 << 6,
-    kBRide = 1 << 7,
-    kBEtc = 1 << 8,
-};
+// ---- 악기별 분류 ----
+// 규칙 자체는 gui/DrumClassify.h 에 있다 (GUI 없이 단위 테스트하려고 뺐다).
 constexpr const char* kBucketNames[9] = {"킥",     "스네어", "클랩",   "클로즈드 햇",
                                          "오픈 햇", "탐",     "크래시", "라이드",
                                          "기타/퍼커션"};
 // 드럼 행 -> 기본 버킷 인덱스 (kRows 순서와 1:1)
 constexpr int kRowBucket[kNumRows] = {6, 7, 4, 3, 5, 5, 5, 2, 1, 0};
-
-uint16_t classifyDrumPath(std::string s) {
-    for (auto& c : s) c = (char)tolower((unsigned char)c);
-    const auto has = [&](const char* kw) { return s.find(kw) != std::string::npos; };
-    uint16_t m = 0;
-    if (has("clap")) m |= kBClap;
-    if (has("snare") || has("rim")) m |= kBSnare;
-    if (has("kick") || has("bassdrum") || has("bass drum") || has("bass-drum") ||
-        (has("bd") && !has("bell")))
-        m |= kBKick;
-    if (has("hat") || has("hihat") || has("hi-hat") || has("hh")) {
-        if (has("open")) m |= kBHatOpen;
-        else if (has("close") || has("cls") || has("chh")) m |= kBHatClosed;
-        else m |= (uint16_t)(kBHatClosed | kBHatOpen); // 모호하면 둘 다에 보인다
-    }
-    if (has("tom")) m |= kBTom;
-    if (has("crash")) m |= kBCrash;
-    if (has("ride")) m |= kBRide;
-    if (has("cymbal") || has("cym")) {
-        if (!(m & (kBCrash | kBRide))) m |= (uint16_t)(kBCrash | kBRide);
-    }
-    if (m == 0) m = kBEtc;
-    return m;
-}
 
 // 라이브러리 전체 스캔 캐시 (처음 열 때 한 번)
 struct DrumLibEntry {

@@ -41,6 +41,10 @@ MidiPro 실행 파일은 이 순서로 찾습니다:
 | `midipro_add_chords` | 코드 심볼로 화음 찍기 (`["C","Am","F","G7"]`) |
 | `midipro_add_drums` | 스텝 문자열로 드럼 패턴 찍기 |
 | `midipro_set_tempo` | 기본 템포(BPM) 바꾸기 |
+| `midipro_set_drumkit` | 드럼을 내장 신디 대신 실제 WAV 샘플로 (자동 선택) |
+| `midipro_list_drumkits` | 드럼 라이브러리의 드럼머신·계열 목록 |
+| `midipro_set_instrument` | 트랙에 VST3 악기(VSTi) 얹기 |
+| `midipro_add_effect` | FX 체인에 이펙트 추가 (VST3 또는 내장) |
 | `midipro_import_midi` | `.mid` 파일 가져오기 (새 트랙들로 또는 한 트랙에 합치기) |
 | `midipro_export_midi` | 프로젝트를 표준 `.mid`(포맷 1)로 내보내기 |
 | `midipro_open` | 만든 프로젝트를 MidiPro로 열기 |
@@ -86,6 +90,35 @@ MidiPro 피아노 롤과 같은 기준입니다 (**C4 = 60**, A0 = 21, C8 = 108)
 5. midipro_open            path=D:\곡\demo.midipro
 ```
 
+## 드럼 샘플 자동 배정
+
+드럼은 기본이 내장 신디 소리입니다. 실제 WAV로 바꾸려면:
+
+```
+midipro_set_drumkit  path=곡.midipro
+    -> 드럼 트랙이 쓰는 노트를 찾아 라이브러리에서 킥/스네어/햇/탐/심벌을 자동으로 고른다
+midipro_set_drumkit  path=곡.midipro  kit="Akai Producer Kits"  family="Acoustic"
+    -> 특정 드럼머신의 특정 계열로 (어쿠스틱 드럼을 원하면 family="Acoustic")
+midipro_set_drumkit  path=곡.midipro  dryRun=true
+    -> 파일을 고치지 않고 어떤 샘플이 걸릴지만 미리 본다
+```
+
+라이브러리는 앱과 같은 자리에서 찾습니다: `<저장소>\src\Drum` →
+`%LOCALAPPDATA%\MidiPro\Drum` (환경변수 `MIDIPRO_DRUMLIB`로 지정 가능).
+
+**고르는 방식** — 앱의 자동 분류(`gui/PanelsDrums.cpp`)를 옮기되 두 가지를 고쳤습니다:
+
+- **낱말 단위로 봅니다.** 단순 부분 문자열이면 "Bo**ttom**s Up"이 탐으로,
+  "3**rd**"가 라이드로 잡힙니다. 사람이 목록에서 고를 때는 눈으로 걸러지지만
+  자동 배정은 그대로 집어가므로 오탐이 치명적입니다.
+- **점수를 매깁니다.** "snare"라고 적힌 파일이 "rim"보다, "crash"가 막연한
+  "cymbal"보다 먼저 뽑힙니다. `Kik`·`Sn`·`Rd`·`Crsh` 같은 약어도 알아봅니다.
+
+그리고 킷 안에 `Acoustic-Kick-...`, `Urban-Tom-...` 처럼 **계열**이 있으면
+필요한 악기를 가장 많이 갖춘 계열로 통일합니다 — 킥만 어쿠스틱, 탐만 힙합인
+잡탕을 피하려는 것입니다. 탐 3개처럼 같은 분류에 여러 노트가 걸리면 후보를
+고르게 훑어 서로 다른 샘플이 걸리게 하고, 한 파일이 두 드럼에 겹치지 않게 합니다.
+
 ## MIDI 파일 주고받기
 
 ```
@@ -105,8 +138,13 @@ midipro_export_midi  path=곡.midipro  midiPath=내보내기.mid
 
 ## 주의
 
-- **MidiPro에서 그 프로젝트를 열어 둔 채로 편집하지 마세요.** 앱이 자동 저장하면서
-  MCP가 쓴 내용을 덮어씁니다. 앱을 닫고 편집한 뒤 다시 여는 게 안전합니다.
+- **MidiPro에서 그 프로젝트를 열어 둔 채로는 편집이 막힙니다.** 앱이 자동 저장하면서
+  MCP가 쓴 내용을 덮어쓰기 때문입니다. 앱이 `session.lock`을 만들어 두었고
+  `recent.txt` 맨 윗줄이 그 파일이면 열려 있다고 보고 막습니다. 앱을 닫고 편집한 뒤
+  다시 여세요. 확실한 판정은 아니므로 `force: true`로 넘길 수 있고,
+  `MIDIPRO_OPEN_GUARD=off`로 아예 끌 수도 있습니다.
+  (앱이 비정상 종료해 `session.lock`이 남으면 계속 막힙니다 — 앱을 한 번 켰다
+  정상 종료하면 풀립니다.)
 - 이 서버는 노트·코드·드럼·템포만 다룹니다. VST 로드, 믹스, 오디오 녹음 같은
   기능은 앱에서 하세요 (그런 설정이 담긴 파일을 편집해도 설정은 보존됩니다).
 

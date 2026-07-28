@@ -22,7 +22,7 @@
 // =============================================================
 
 import { existsSync, readFileSync, writeFileSync, renameSync, copyFileSync,
-         mkdirSync } from 'node:fs';
+         mkdirSync, readdirSync } from 'node:fs';
 import { execFileSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
@@ -393,6 +393,294 @@ function projectToSmf(proj, which) {
 }
 
 // ------------------------------------------------------------------
+// 플러그인 (tplugin 줄)
+//
+// 앱은 프로젝트를 열 때 tplugin 줄을 보고 VST3를 실제로 로드한다
+// (gui/App.cpp). 로드에 실패하면 그 줄만 조용히 버리므로, 잘못 써도
+// 프로젝트가 깨지지는 않는다.
+//
+// 형식: tplugin <악기?1:0> <켜짐?1:0> <classIndex> <이름>\t<경로>
+// classIndex = -1 은 "번들에서 클래스 자동 선택" — 앱 UI가 쓰는 값과 같다.
+// 내장 이펙트는 경로가 "builtin:<토큰>" 이고 파라미터는 기본값을 쓴다.
+// ------------------------------------------------------------------
+const BUILTIN_FX = {
+    eq: 'EQ', delay: '딜레이', reverb: '리버브', limiter: '리미터', comp: '컴프레서',
+};
+const BUILTIN_ALIAS = {
+    eq: 'eq', 이퀄라이저: 'eq',
+    delay: 'delay', 딜레이: 'delay', echo: 'delay',
+    reverb: 'reverb', 리버브: 'reverb',
+    limiter: 'limiter', 리미터: 'limiter',
+    comp: 'comp', compressor: 'comp', 컴프레서: 'comp', 컴프: 'comp',
+};
+
+function scannedPlugins() {
+    const f = path.join(dataDir(), 'plugincache.ini');
+    if (!existsSync(f)) return [];
+    return readFileSync(f, 'utf8').split(/\r?\n/).slice(1).map((L) => {
+        const m = /^(\d+)\s+(\d+)\s+(\d)\s+(\d)\s+(.+)$/.exec(L);
+        if (!m) return null;
+        return {
+            path: m[5], name: path.basename(m[5], '.vst3'),
+            instrument: m[3] === '1', effect: m[4] === '1',
+        };
+    }).filter(Boolean);
+}
+
+// "Surge XT" 같은 이름이나 .vst3 전체 경로를 받아 {name, path}로 바꾼다.
+function resolveVst(spec, wantInstrument) {
+    const s = String(spec).trim();
+    const kind = wantInstrument ? '악기' : '이펙트';
+    if (/[\\/]/.test(s) || /\.vst3$/i.test(s)) {
+        if (!existsSync(s)) throw new Error(`VST3를 찾을 수 없습니다: ${s}`);
+        return { name: path.basename(s, '.vst3'), path: path.resolve(s) };
+    }
+    const all = scannedPlugins();
+    if (!all.length)
+        throw new Error('스캔된 VST3가 없습니다. 앱의 VST3 창에서 "플러그인 검색"을 먼저 하세요.');
+    const usable = all.filter((p) => (wantInstrument ? p.instrument : p.effect));
+    const low = s.toLowerCase();
+    const hit = usable.find((p) => p.name.toLowerCase() === low)
+             ?? usable.find((p) => p.name.toLowerCase().includes(low));
+    if (!hit) {
+        const other = all.find((p) => p.name.toLowerCase().includes(low));
+        if (other)
+            throw new Error(`"${other.name}"은(는) ${kind}로 쓸 수 없습니다 ` +
+                            `(악기=${other.instrument ? 'O' : 'X'}, 이펙트=${other.effect ? 'O' : 'X'})`);
+        throw new Error(`${kind}로 쓸 수 있는 "${s}"을(를) 못 찾았습니다. ` +
+                        `쓸 수 있는 것: ${usable.map((p) => p.name).join(', ') || '없음'}`);
+    }
+    return { name: hit.name, path: hit.path };
+}
+
+// tplugin 줄은 taudio 블록(taudio+tgain/tfade가 붙어 다닌다) 앞에 넣는다.
+function insertPluginLine(track, line) {
+    const at = track.lines.findIndex((L) => L.startsWith('taudio '));
+    if (at < 0) track.lines.push(line);
+    else track.lines.splice(at, 0, line);
+}
+
+const pluginLine = (isInst, name, p) => `tplugin ${isInst ? 1 : 0} 1 -1 ${name}\t${p}`;
+
+// ------------------------------------------------------------------
+// 드럼 샘플 라이브러리 (drumsample 줄)
+//
+// 프로젝트 헤더의 "drumsample <노트> <경로>" 는 그 노트를 내장 신디 대신
+// WAV로 소리내게 한다. 앱은 파일 경로의 낱말로 킥/스네어/햇을 자동 분류하는데
+// (gui/PanelsDrums.cpp classifyDrumPath), 여기서 같은 규칙을 그대로 옮겨
+// 어떤 샘플이 어느 드럼인지 알아낸 뒤 자동 배정한다.
+//
+// 라이브러리 위치도 앱과 같은 순서로 찾는다: <저장소>/src/Drum ->
+// %LOCALAPPDATA%\MidiPro\Drum.
+// ------------------------------------------------------------------
+function drumLibRoot() {
+    const cands = [
+        process.env.MIDIPRO_DRUMLIB,
+        path.join(HERE, '..', 'src', 'Drum'),
+        path.join(dataDir(), 'Drum'),
+    ].filter(Boolean);
+    for (const c of cands) if (existsSync(c)) return path.resolve(c);
+    return null;
+}
+
+// 앱의 classifyDrumPath(gui/PanelsDrums.cpp)를 옮기되 두 가지를 고쳤다:
+//
+//  1) 낱말 단위로 본다. 단순 부분 문자열이면 "Bottoms Up"이 "tom"으로,
+//     "Bell"이 "bd"로 잡힌다. 사람이 목록에서 고를 때는 눈으로 걸러지지만
+//     자동 배정은 그대로 집어가므로 오탐이 치명적이다.
+//  2) 0/1이 아니라 점수를 준다. "snare"라고 적힌 파일이 "rim"보다,
+//     "crash"가 막연한 "cymbal"보다 먼저 뽑히게 하려는 것.
+const wordIn = (s, w) => new RegExp(`(^|[^a-z])${w}s?([^a-z]|$)`).test(s);
+// 약어("rd", "bd", "hh")는 숫자까지 경계로 본다 — 그래야 "3rd"가 ride로 잡히지 않는다
+const abbrIn = (s, w) => new RegExp(`(^|[^a-z0-9])${w}s?([^a-z0-9]|$)`).test(s);
+
+function scoreDrum(rel) {
+    const s = rel.toLowerCase();
+    const has = (k) => s.includes(k);
+    const w = (k) => wordIn(s, k);
+    const ab = (k) => abbrIn(s, k);
+    const m = new Map();
+    const put = (b, sc) => m.set(b, Math.max(m.get(b) ?? 0, sc));
+
+    if (w('clap')) put('clap', 2);
+    if (w('snare') || ab('snr') || ab('sn')) put('snare', 2);
+    if (w('rim')) { put('rim', 2); put('snare', 1); } // 스네어가 없을 때만 대타
+    if (w('kick') || ab('kik') || has('bassdrum') || has('bass drum') ||
+        has('bass-drum') || ab('bd')) put('kick', 2);
+    if (w('hat') || has('hihat') || has('hi-hat') || ab('hh') || ab('chh') || ab('ohh')) {
+        if (has('open') || ab('ohh')) put('hatopen', 2);
+        else if (has('close') || ab('cls') || ab('chh')) put('hatclosed', 2);
+        else { put('hatclosed', 1); put('hatopen', 1); } // 모호하면 둘 다 약하게
+    }
+    if (w('tom')) put('tom', 2);
+    if (w('crash') || ab('crsh') || ab('crs')) put('crash', 2);
+    if (w('ride') || ab('rd')) put('ride', 2);
+    if (w('cymbal') || ab('cym')) { put('crash', 1); put('ride', 1); }
+    if (m.size === 0) m.set('etc', 1);
+    return m;
+}
+
+// GM 드럼 노트 -> 어느 분류에서 고를지 (앞이 없으면 뒤로 대체)
+const NOTE_BUCKET = {
+    35: 'kick', 36: 'kick',
+    37: 'rim', 38: 'snare', 40: 'snare',
+    39: 'clap',
+    42: 'hatclosed', 44: 'hatclosed',
+    46: 'hatopen',
+    41: 'tom', 43: 'tom', 45: 'tom', 47: 'tom', 48: 'tom', 50: 'tom',
+    49: 'crash', 52: 'crash', 55: 'crash', 57: 'crash',
+    51: 'ride', 53: 'ride', 59: 'ride',
+};
+const BUCKET_FALLBACK = {
+    rim: ['rim', 'snare'], snare: ['snare', 'rim'],
+    hatopen: ['hatopen', 'hatclosed'], hatclosed: ['hatclosed', 'hatopen'],
+    crash: ['crash', 'ride'], ride: ['ride', 'crash'],
+    clap: ['clap', 'snare'],
+};
+const BUCKET_LABEL = {
+    kick: '킥', snare: '스네어', clap: '클랩', hatclosed: '클로즈드 햇',
+    hatopen: '오픈 햇', tom: '탐', crash: '크래시', ride: '라이드', etc: '기타',
+};
+const DRUM_NOTE_NAME = {
+    35: '킥2', 36: '킥', 37: '림', 38: '스네어', 39: '클랩', 40: '스네어2',
+    41: '플로어 탐', 42: '클로즈드 햇', 43: '로우 탐', 44: '페달 햇', 45: '로우 탐',
+    46: '오픈 햇', 47: '미드 탐', 48: '하이 탐', 49: '크래시', 50: '하이 탐',
+    51: '라이드', 52: '차이나', 53: '라이드 벨', 54: '탬버린', 55: '스플래시',
+    56: '카우벨', 57: '크래시2', 59: '라이드2', 75: '클라베', 82: '셰이커',
+};
+
+// 라이브러리 스캔은 파일이 수천 개라 프로세스당 한 번만 한다.
+let g_drumLib = null;
+function scanDrumLib() {
+    if (g_drumLib) return g_drumLib;
+    const root = drumLibRoot();
+    g_drumLib = { root, files: [], kits: new Map() };
+    if (!root) return g_drumLib;
+    const walk = (dir) => {
+        let ents;
+        try { ents = readdirSync(dir, { withFileTypes: true }); } catch { return; }
+        for (const e of ents) {
+            const full = path.join(dir, e.name);
+            if (e.isDirectory()) walk(full);
+            else if (/\.wav$/i.test(e.name)) {
+                const rel = path.relative(root, full);
+                const segs = rel.split(/[\\/]/);
+                // 구조: <아카이브>/<드럼머신>/<악기폴더>/<파일>. 앱 표시도 첫 칸을 뺀다.
+                const kit = segs.length >= 3 ? segs[1] : segs[0];
+                // 같은 킷 안의 "계열" — "Acoustic-Kick-...", "Urban-Tom-..." 처럼
+                // 파일 이름이 <계열>-<악기>-<이름> 꼴이면 계열을 뽑아 둔다.
+                // 계열을 맞춰 고르면 킥만 어쿠스틱, 탐만 힙합인 잡탕을 피한다.
+                const base = e.name.replace(/\.wav$/i, '');
+                const parts = base.split('-');
+                const family = parts.length >= 3 ? parts[0].trim() : null;
+                const f = { full, rel, kit, family, scores: scoreDrum(rel) };
+                g_drumLib.files.push(f);
+                if (!g_drumLib.kits.has(kit)) g_drumLib.kits.set(kit, []);
+                g_drumLib.kits.get(kit).push(f);
+            }
+        }
+    };
+    walk(root);
+    g_drumLib.files.sort((a, b) => a.rel.localeCompare(b.rel));
+    for (const list of g_drumLib.kits.values()) list.sort((a, b) => a.rel.localeCompare(b.rel));
+    return g_drumLib;
+}
+
+const hasBucket = (f, b) => (f.scores.get(b) ?? 0) > 0;
+const kitCoverage = (files, buckets) =>
+    buckets.filter((b) => files.some((f) => hasBucket(f, b))).length;
+
+// 한 분류의 후보들: 점수 높은 것 먼저, 같으면 이름순. 없으면 대체 분류로.
+function candidatesFor(files, bucket) {
+    for (const b of BUCKET_FALLBACK[bucket] ?? [bucket]) {
+        const hit = files.filter((f) => hasBucket(f, b));
+        if (!hit.length) continue;
+        const top = Math.max(...hit.map((f) => f.scores.get(b)));
+        const best = hit.filter((f) => f.scores.get(b) === top);
+        best.sort((a, c) => a.rel.localeCompare(c.rel));
+        return best;
+    }
+    return [];
+}
+
+// 한 킷 안에서 노트들에 샘플을 배정한다.
+// 계열(Acoustic/Urban 등)이 있으면 필요한 악기를 가장 많이 갖춘 계열로 통일하고,
+// 그 계열에 없는 악기만 킷 전체에서 가져온다.
+// 같은 분류에 여러 노트가 걸리면(탐 3개 등) 후보 목록을 고르게 훑어 서로 다른
+// 샘플이 걸리게 한다 — 보통 이름 순서가 낮은 음~높은 음이라 자연스럽다.
+function assignKit(files, notes, wantFamily) {
+    const grouped = new Map();
+    for (const n of notes) {
+        const b = NOTE_BUCKET[n] ?? 'etc';
+        if (!grouped.has(b)) grouped.set(b, []);
+        grouped.get(b).push(n);
+    }
+    const wanted = [...grouped.keys()];
+
+    const fams = new Map();
+    for (const f of files) {
+        if (!f.family) continue;
+        if (!fams.has(f.family)) fams.set(f.family, []);
+        fams.get(f.family).push(f);
+    }
+    let famName = null, famFiles = null;
+    if (wantFamily) {
+        const low = String(wantFamily).toLowerCase();
+        const hit = [...fams.keys()].find((k) => k.toLowerCase() === low)
+                 ?? [...fams.keys()].find((k) => k.toLowerCase().includes(low));
+        if (!hit)
+            throw new Error(`"${wantFamily}" 계열이 이 킷에 없습니다. ` +
+                            `있는 계열: ${[...fams.keys()].sort().join(', ') || '(계열 구분 없음)'}`);
+        famName = hit;
+        famFiles = fams.get(hit);
+    } else {
+        for (const [name, fs2] of fams) {
+            const cov = kitCoverage(fs2, wanted);
+            if (!famFiles || cov > kitCoverage(famFiles, wanted) ||
+                (cov === kitCoverage(famFiles, wanted) && fs2.length > famFiles.length)) {
+                famName = name; famFiles = fs2;
+            }
+        }
+    }
+
+    const out = [], missing = [];
+    const used = new Set(); // 같은 파일이 두 드럼에 걸리지 않게
+    for (const [b, ns] of grouped) {
+        let cands = famFiles ? candidatesFor(famFiles, b) : [];
+        let fromFamily = cands.length > 0;
+        if (!cands.length) cands = candidatesFor(files, b);
+        if (!cands.length) { missing.push(...ns); continue; }
+        ns.sort((x, y) => x - y);
+        ns.forEach((n, i) => {
+            const idx = ns.length === 1 ? 0
+                      : Math.round((i * (cands.length - 1)) / (ns.length - 1));
+            let pick = cands[Math.min(idx, cands.length - 1)];
+            // 이미 쓴 샘플이면 가까운 미사용 후보로 비킨다 (크래시/라이드가
+            // 같은 "cymbal" 후보군을 나눠 쓸 때 똑같은 파일이 걸리는 걸 막는다)
+            if (used.has(pick.full)) {
+                const free = cands.filter((c) => !used.has(c.full));
+                if (free.length) pick = free[Math.min(idx, free.length - 1)];
+            }
+            used.add(pick.full);
+            out.push({ note: n, bucket: b, fromFamily, file: pick });
+        });
+    }
+    out.sort((a, b2) => a.note - b2.note);
+    return { assigned: out, missing, family: famName };
+}
+
+// 프로젝트의 드럼 트랙(채널 9)이 실제로 쓰는 노트들
+function usedDrumNotes(song) {
+    const s = new Set();
+    for (const t of song.tracks) {
+        if ((t.channel & 0x0f) !== 9) continue;
+        for (const e of t.evs)
+            if ((e.status & 0xf0) === 0x90 && e.d2 > 0) s.add(e.d1);
+    }
+    return [...s].sort((a, b) => a - b);
+}
+
+// ------------------------------------------------------------------
 // MidiPro 실행 파일 찾기
 // ------------------------------------------------------------------
 function findMidiProExe() {
@@ -415,6 +703,57 @@ function isMidiProRunning() {
 }
 
 const localAppData = () => process.env.LOCALAPPDATA || path.join(process.env.USERPROFILE || '', 'AppData', 'Local');
+// 앱의 사용자 데이터 폴더 (autosave/settings/recent/plugincache/session.lock)
+const dataDir = () => process.env.MIDIPRO_DATA_DIR
+    ? path.resolve(process.env.MIDIPRO_DATA_DIR)
+    : path.join(localAppData(), 'MidiPro');
+
+// ------------------------------------------------------------------
+// "앱이 이 프로젝트를 열고 있는가" 안전장치
+//
+// 왜 필요한가: 이 서버는 파일을 직접 고치는데, 앱은 열어 둔 프로젝트를 주기적으로
+// 자동 저장한다. 앱이 그 프로젝트를 열고 있는 동안 고치면 편집이 통째로 사라진다.
+// (개발 중에 실제로 여러 번 겪었다.)
+//
+// 판별: session.lock 은 앱이 시작할 때 만들고 정상 종료 때 지운다 = 세션 진행 중.
+// recent.txt 맨 윗줄 = 앱이 가장 최근에 연 프로젝트. 둘이 겹치면 열려 있다고 본다.
+// 확실한 판정은 아니다(앱에서 새 곡을 만들었을 수도 있다) — 그래서 force로 넘길 수 있다.
+// ------------------------------------------------------------------
+function openProjectState(file) {
+    const dir = dataDir();
+    const live = existsSync(path.join(dir, 'session.lock'));
+    let top = null;
+    const rf = path.join(dir, 'recent.txt');
+    if (existsSync(rf)) {
+        const lines = readFileSync(rf, 'utf8').split(/\r?\n/).filter(Boolean);
+        top = lines[0] ?? null;
+    }
+    const same = !!top && path.resolve(top).toLowerCase() === path.resolve(file).toLowerCase();
+    return { live, top, same };
+}
+
+// 막아야 하면 예외를 던지고, 그냥 조심시킬 상황이면 경고 문자열을 돌려준다.
+function guardProjectOpen(file, force) {
+    if (process.env.MIDIPRO_OPEN_GUARD === 'off') return null;
+    const s = openProjectState(file);
+    if (!s.live) return null; // 세션 없음 = 안전
+    if (s.same && !force)
+        throw new Error(
+            `MidiPro가 이 프로젝트를 열고 있는 것 같습니다 — 지금 고치면 앱이 자동 저장할 때 편집이 사라집니다.\n` +
+            `  1) 앱에서 저장하고 닫은 뒤 다시 하세요 (권장)\n` +
+            `  2) 앱이 이미 꺼져 있는데 이 메시지가 나오면 비정상 종료로 남은 세션 표시입니다 — ` +
+            `앱을 한 번 켰다 정상 종료하거나 force: true 로 넘기세요\n` +
+            `파일: ${file}`);
+    if (s.same) return '[주의] 앱이 이 프로젝트를 열고 있는데 force로 강행했습니다 — 앱에서 저장하면 이 편집이 덮어써집니다.';
+    return '[경고] MidiPro가 실행 중입니다. 이 프로젝트를 앱에서도 열고 있다면 앱의 자동 저장이 이 편집을 덮어씁니다.';
+}
+
+// 프로젝트 파일을 고치는 도구들 — 위 안전장치를 거친다
+const MUTATING_TOOLS = new Set([
+    'midipro_create_project', 'midipro_add_track', 'midipro_add_notes', 'midipro_add_chords',
+    'midipro_add_drums', 'midipro_set_tempo', 'midipro_import_midi', 'midipro_set_drumkit',
+    'midipro_set_instrument', 'midipro_add_effect',
+]);
 
 // ------------------------------------------------------------------
 // 도구 구현
@@ -813,6 +1152,187 @@ const TOOLS = {
         },
     },
 
+    // --- 드럼 킷 (샘플 자동 배정) ------------------------------------------
+    midipro_set_drumkit: {
+        description:
+            '드럼을 내장 신디 대신 실제 WAV 샘플로 소리나게 한다. 프로젝트의 드럼 트랙이 쓰는 노트를 찾아 ' +
+            '드럼 라이브러리에서 킥/스네어/햇/탐/심벌을 자동으로 골라 배정한다. ' +
+            'kit을 주면 그 드럼머신에서만 고르고, 안 주면 필요한 악기를 가장 많이 갖춘 킷을 자동으로 고른다. ' +
+            '사용 가능한 킷은 midipro_list_drumkits로 확인.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                path: { type: 'string', description: '.midipro 파일' },
+                kit: { type: 'string', description: '드럼머신 이름 일부 (예: "909", "Akai"). 생략하면 자동 선택' },
+                family: {
+                    type: 'string',
+                    description: '킷 안의 음색 계열 (예: "Acoustic", "Trap", "Urban"). ' +
+                                 '생략하면 필요한 악기를 가장 많이 갖춘 계열. 어쿠스틱 드럼을 원하면 "Acoustic".',
+                },
+                notes: {
+                    type: 'array', items: { type: 'integer' },
+                    description: '배정할 노트 번호들 (생략하면 드럼 트랙이 실제로 쓰는 노트 전부)',
+                },
+                dryRun: { type: 'boolean', description: 'true면 파일을 고치지 않고 어떤 샘플이 걸릴지만 보여준다' },
+            },
+            required: ['path'],
+        },
+        run(args) {
+            const file = path.resolve(String(args.path));
+            const proj = loadProjectFile(file);
+            const lib = scanDrumLib();
+            if (!lib.root)
+                throw new Error('드럼 샘플 라이브러리를 찾지 못했습니다 ' +
+                                '(<저장소>\\src\\Drum 또는 %LOCALAPPDATA%\\MidiPro\\Drum, 환경변수 MIDIPRO_DRUMLIB)');
+            if (!lib.files.length) throw new Error(`라이브러리에 WAV가 없습니다: ${lib.root}`);
+
+            const notes = Array.isArray(args.notes) && args.notes.length
+                ? args.notes.map((n) => clamp(Math.round(Number(n)), 0, 127))
+                : usedDrumNotes(proj.song);
+            if (!notes.length)
+                throw new Error('드럼 트랙(채널 10)에 노트가 없습니다. 먼저 midipro_add_drums로 패턴을 찍으세요.');
+
+            const wanted = [...new Set(notes.map((n) => NOTE_BUCKET[n] ?? 'etc'))];
+            let kitName, files;
+            if (args.kit) {
+                const low = String(args.kit).toLowerCase();
+                const hit = [...lib.kits.keys()].find((k) => k.toLowerCase() === low)
+                         ?? [...lib.kits.keys()].find((k) => k.toLowerCase().includes(low));
+                if (!hit) throw new Error(`"${args.kit}"에 맞는 드럼머신이 없습니다 (킷 ${lib.kits.size}개) — midipro_list_drumkits로 확인하세요`);
+                kitName = hit;
+                files = lib.kits.get(hit);
+            } else {
+                // 필요한 악기를 가장 많이 갖춘 킷 (동점이면 샘플이 많은 쪽)
+                let best = null;
+                for (const [k, fs2] of lib.kits) {
+                    const cov = kitCoverage(fs2, wanted);
+                    if (!best || cov > best.cov || (cov === best.cov && fs2.length > best.files.length))
+                        best = { k, cov, files: fs2 };
+                }
+                kitName = best.k;
+                files = best.files;
+            }
+
+            const { assigned, missing, family } = assignKit(files, notes, args.family);
+            if (!assigned.length) throw new Error(`"${kitName}" 킷에서 쓸 수 있는 샘플을 못 찾았습니다`);
+
+            const lines = assigned.map((a) =>
+                `  ${a.note} ${DRUM_NOTE_NAME[a.note] ?? ''} (${BUCKET_LABEL[a.bucket]}) -> ${path.basename(a.file.full)}` +
+                (family && !a.fromFamily ? ' [계열 밖]' : ''));
+            const head = `드럼 킷: ${kitName}${family ? ` / ${family} 계열` : ''}\n` +
+                         `라이브러리: ${lib.root} (WAV ${lib.files.length}개, 킷 ${lib.kits.size}개)\n` +
+                         `배정 ${assigned.length}개:\n${lines.join('\n')}` +
+                         (missing.length ? `\n※ 샘플을 못 찾아 내장 신디로 남는 노트: ${missing.join(', ')}` : '');
+            if (args.dryRun) return `[미리보기 — 파일은 고치지 않았습니다]\n${head}`;
+
+            // 기존 drumsample 줄을 걷어내고 새로 쓴다 (헤더는 [song] 앞)
+            proj.header = proj.header.filter((L) => !L.startsWith('drumsample '));
+            for (const a of assigned) proj.header.push(`drumsample ${a.note} ${a.file.full}`);
+            saveProjectFile(file, proj);
+            return `${head}\n앱에서 프로젝트를 열면 이 샘플로 소리납니다 — ${file}`;
+        },
+    },
+
+    midipro_list_drumkits: {
+        description:
+            '드럼 샘플 라이브러리에 있는 드럼머신(킷) 목록을 보여준다. 각 킷이 어떤 악기를 갖췄는지도 함께.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                filter: { type: 'string', description: '이름에 이 낱말이 든 킷만 (예: "roland", "909")' },
+                limit: { type: 'integer', description: '최대 개수 (기본 40)' },
+            },
+        },
+        run(args) {
+            const lib = scanDrumLib();
+            if (!lib.root) throw new Error('드럼 샘플 라이브러리를 찾지 못했습니다');
+            const want = ['kick', 'snare', 'hatclosed', 'hatopen', 'tom', 'crash', 'ride', 'clap'];
+            const low = args.filter ? String(args.filter).toLowerCase() : null;
+            const rows = [...lib.kits.entries()]
+                .filter(([k]) => !low || k.toLowerCase().includes(low))
+                .map(([k, fs2]) => ({
+                    kit: k, samples: fs2.length,
+                    has: want.filter((b) => fs2.some((f) => hasBucket(f, b))).map((b) => BUCKET_LABEL[b]),
+                    families: [...new Set(fs2.map((f) => f.family).filter(Boolean))].sort(),
+                }))
+                .sort((a, b) => b.has.length - a.has.length || b.samples - a.samples);
+            const limit = args.limit === undefined ? 40 : requireNum(args.limit, 'limit', { min: 1, max: 500 });
+            return JSON.stringify({
+                root: lib.root, totalWav: lib.files.length, kitCount: lib.kits.size,
+                shown: Math.min(limit, rows.length),
+                kits: rows.slice(0, limit),
+            }, null, 2);
+        },
+    },
+
+    // --- 트랙 악기 (VSTi) -------------------------------------------------
+    midipro_set_instrument: {
+        description:
+            '트랙에 VST3 악기(VSTi)를 얹는다. 프로젝트를 열면 앱이 실제로 로드한다. ' +
+            '플러그인은 이름("Surge XT")이나 .vst3 전체 경로로 지정한다. 트랙당 악기는 하나라 기존 악기는 교체된다. ' +
+            '쓸 수 있는 목록은 midipro_status로 확인.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                path: { type: 'string', description: '.midipro 파일' },
+                track: { description: '트랙 번호 또는 이름' },
+                plugin: { type: 'string', description: '악기 이름 또는 .vst3 경로 (예: "Surge XT")' },
+            },
+            required: ['path', 'track', 'plugin'],
+        },
+        run(args) {
+            const file = path.resolve(String(args.path));
+            const proj = loadProjectFile(file);
+            const ti = resolveTrack(proj.song, args.track);
+            const t = proj.song.tracks[ti];
+            const vst = resolveVst(args.plugin, true);
+            const had = t.lines.filter((L) => L.startsWith('tplugin 1 ')).length;
+            t.lines = t.lines.filter((L) => !L.startsWith('tplugin 1 ')); // 악기는 트랙당 1개
+            insertPluginLine(t, pluginLine(true, vst.name, vst.path));
+            saveProjectFile(file, proj);
+            return `"${t.name}" 트랙 악기: ${vst.name}${had ? ' (기존 악기 교체)' : ''}\n` +
+                   `${vst.path}\n앱에서 프로젝트를 열면 로드됩니다 — ${file}`;
+        },
+    },
+
+    // --- 트랙 이펙트 ------------------------------------------------------
+    midipro_add_effect: {
+        description:
+            '트랙 FX 체인에 이펙트를 추가한다(맨 뒤에 붙는다). VST3 이펙트는 이름이나 .vst3 경로로, ' +
+            '내장 이펙트는 eq / delay / reverb / limiter / comp 로 지정한다. 프로젝트를 열면 앱이 실제로 로드한다.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                path: { type: 'string', description: '.midipro 파일' },
+                track: { description: '트랙 번호 또는 이름' },
+                effect: { type: 'string', description: 'VST3 이름/경로, 또는 내장: eq, delay, reverb, limiter, comp' },
+            },
+            required: ['path', 'track', 'effect'],
+        },
+        run(args) {
+            const file = path.resolve(String(args.path));
+            const proj = loadProjectFile(file);
+            const ti = resolveTrack(proj.song, args.track);
+            const t = proj.song.tracks[ti];
+            const key = String(args.effect).trim().toLowerCase();
+            const builtin = BUILTIN_ALIAS[key];
+            let label;
+            if (builtin) {
+                label = BUILTIN_FX[builtin];
+                insertPluginLine(t, pluginLine(false, label, `builtin:${builtin}`));
+            } else {
+                const vst = resolveVst(args.effect, false);
+                label = vst.name;
+                insertPluginLine(t, pluginLine(false, vst.name, vst.path));
+            }
+            saveProjectFile(file, proj);
+            const chain = t.lines.filter((L) => L.startsWith('tplugin 0 '))
+                                 .map((L) => L.split('\t')[0].split(/\s+/).slice(4).join(' '));
+            return `"${t.name}" 트랙에 이펙트 추가: ${label}\n` +
+                   `FX 체인: ${chain.join(' -> ')} — ${file}`;
+        },
+    },
+
     // --- MIDI 파일 가져오기 ----------------------------------------------
     midipro_import_midi: {
         description:
@@ -969,7 +1489,7 @@ const TOOLS = {
         inputSchema: { type: 'object', properties: {} },
         run() {
             const exe = findMidiProExe();
-            const ad = path.join(localAppData(), 'MidiPro');
+            const ad = dataDir();
             const readLines = (f) => existsSync(f) ? readFileSync(f, 'utf8').split(/\r?\n/).filter(Boolean) : [];
 
             const plugins = readLines(path.join(ad, 'plugincache.ini')).slice(1).map((L) => {
@@ -981,9 +1501,12 @@ const TOOLS = {
                 };
             }).filter(Boolean);
 
+            const sess = openProjectState(ad); // 열려 있는 프로젝트 추정용
             return JSON.stringify({
                 exe: exe ?? '(찾지 못함 — 환경변수 MIDIPRO_EXE로 지정하세요)',
                 running: isMidiProRunning(),
+                sessionLive: sess.live,
+                likelyOpenProject: sess.live ? sess.top : null,
                 userDataDir: ad,
                 crashLog: existsSync(path.join(ad, 'crash.log')) ? path.join(ad, 'crash.log') : null,
                 plugins,
@@ -992,6 +1515,17 @@ const TOOLS = {
         },
     },
 };
+
+// 프로젝트를 고치는 도구 전부에 force를 달아 준다 (스키마를 열 번 손으로
+// 적으면 새 도구를 추가할 때 빠뜨리기 쉽다).
+for (const n of MUTATING_TOOLS) {
+    const t = TOOLS[n];
+    if (!t) throw new Error(`MUTATING_TOOLS에 없는 도구: ${n}`); // 오타 방지
+    t.inputSchema.properties.force = {
+        type: 'boolean',
+        description: '앱이 이 프로젝트를 열고 있어도 강행한다 (앱이 저장하면 편집이 덮어써진다)',
+    };
+}
 
 // ------------------------------------------------------------------
 // MCP (JSON-RPC 2.0 over stdio)
@@ -1033,8 +1567,14 @@ function handle(msg) {
             if (!tool)
                 return ok(id, { content: [{ type: 'text', text: `모르는 도구입니다: ${name}` }], isError: true });
             try {
-                const text = tool.run(params?.arguments ?? {});
-                return ok(id, { content: [{ type: 'text', text: String(text) }] });
+                const a = params?.arguments ?? {};
+                // 프로젝트를 고치는 도구는 "앱이 열고 있는지" 먼저 확인한다.
+                // 한 곳에서 걸러야 도구가 늘어도 빠뜨리지 않는다.
+                let warn = null;
+                if (MUTATING_TOOLS.has(name) && a.path)
+                    warn = guardProjectOpen(path.resolve(String(a.path)), a.force);
+                const text = tool.run(a);
+                return ok(id, { content: [{ type: 'text', text: warn ? `${warn}\n${text}` : String(text) }] });
             } catch (e) {
                 // 도구 실패는 프로토콜 오류가 아니라 결과에 담아 돌려준다 —
                 // 그래야 모델이 메시지를 읽고 스스로 고쳐 다시 시도할 수 있다.
