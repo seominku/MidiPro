@@ -2463,6 +2463,7 @@ void drawMenuBar(AppState& state, bool& openRequested, bool& saveRequested) {
             ImGui::MenuItem("드럼 트랙", nullptr, &state.showDrums);
             ImGui::MenuItem("어레인지", nullptr, &state.showArrange);
             ImGui::MenuItem("기타 연습", nullptr, &state.showTab);
+            ImGui::MenuItem("줄 편집기 (기타/베이스)", nullptr, &state.showStringTab);
             ImGui::MenuItem("신디사이저", nullptr, &state.showSynth);
             ImGui::MenuItem("VST3 플러그인", nullptr, &state.showVst);
             ImGui::MenuItem("기타 도우미", nullptr, &state.showGuitar);

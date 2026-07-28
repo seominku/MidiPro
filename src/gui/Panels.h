@@ -35,6 +35,7 @@ void drawPerf(AppState& state);         // 성능 창 (FPS/오디오 부하/버�
 void drawBuiltinFx(AppState& state);    // 내장 이펙트(EQ/딜레이/리버브) 파라미터 창
 void drawStartScreen(AppState& state);  // 시작 화면 (새 곡·기타 연습·드럼·최근 파일)
 void drawWhatsNew(AppState& state);     // 업데이트 내용 (새 버전으로 처음 켤 때)
+void drawStringTab(AppState& state);    // 줄 편집기 (기타 6줄 / 베이스 4줄)
 void drawBrowser(AppState& state);      // 좌측 브라우저 (악기·이펙트·최근)
 
 // 실제 내용의 끝(틱): MIDI 끝과 오디오 클립 끝 중 긴 쪽 (내보내기 기본 길이)

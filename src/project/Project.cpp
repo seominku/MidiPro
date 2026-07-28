@@ -61,6 +61,7 @@ std::string songToText(const seq::Song& song) {
         os << "tinch " << t.inputChannelMode << "\n";
         if (t.frozen) os << "tfrz 1\n"; // 트랙 프리즈 상태
         if (t.isGuitar) os << "tgtr 1\n"; // 기타 트랙 표시
+        if (t.tabTuning != 0) os << "ttune " << t.tabTuning << "\n"; // 줄 악기 튜닝
         if (t.practice) os << "tprc 1\n"; // 기타 연습 트랙 (연습 창 전용)
         if (!t.importKey.empty()) // 타브 가져오기 그룹 (키는 줄 끝까지)
             os << "timp " << t.importPart << " " << t.importKey << "\n";
@@ -152,6 +153,10 @@ void songFromText(const std::string& text, seq::Song& song, std::vector<AudioRef
             int g = 0;
             ls >> g;
             cur->isGuitar = g != 0;
+        } else if (key == "ttune" && cur) {
+            int tu = 0;
+            ls >> tu;
+            if (tu >= 0 && tu <= 2) cur->tabTuning = tu;
         } else if (key == "tprc" && cur) {
             int p = 0;
             ls >> p;
@@ -261,6 +266,7 @@ std::string versionSongToText(const VersionSnap& v,
         os << "tinch " << t.inputChannelMode << "\n";
         if (t.frozen) os << "tfrz 1\n";
         if (t.isGuitar) os << "tgtr 1\n";
+        if (t.tabTuning != 0) os << "ttune " << t.tabTuning << "\n";
         if (t.practice) os << "tprc 1\n";
         if (!t.importKey.empty()) os << "timp " << t.importPart << " " << t.importKey << "\n";
         for (const auto& h : t.tabHints)

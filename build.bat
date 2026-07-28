@@ -28,7 +28,7 @@ set GUILIBS=winmm.lib ole32.lib oleaut32.lib shell32.lib advapi32.lib user32.lib
 echo === Building GUI app (MidiPro.exe) ===
 rc /nologo /fo build\app.res src\app.rc
 if errorlevel 1 ( echo [ERROR] rc failed & exit /b 1 )
-cl %CFLAGS% %INC% src\main_gui.cpp src\gui\App.cpp src\gui\Panels.cpp src\gui\PanelsMixer.cpp src\gui\PanelsTransport.cpp src\gui\PanelsTrackView.cpp src\gui\PanelsPianoRoll.cpp src\gui\PanelsDrums.cpp src\gui\PanelsArrange.cpp src\gui\PanelsGuitarTab.cpp src\gui\Theme.cpp src\gui\BackgroundImage.cpp src\gui\UiSkin.cpp src\gui\Settings.cpp src\gui\ControlServer.cpp %CORE% %MIDI% %AUDIO% %SEQ% %PDFTAB% %GUITAR% %MAPPING% %PROJECT% %VST% %IMGUI% %GUILIBS% build\app.res /Fe:build\MidiPro.exe /Fo:build\ /link /SUBSYSTEM:WINDOWS
+cl %CFLAGS% %INC% src\main_gui.cpp src\gui\App.cpp src\gui\Panels.cpp src\gui\PanelsMixer.cpp src\gui\PanelsTransport.cpp src\gui\PanelsTrackView.cpp src\gui\PanelsPianoRoll.cpp src\gui\PanelsDrums.cpp src\gui\PanelsArrange.cpp src\gui\PanelsGuitarTab.cpp src\gui\PanelsStringTab.cpp src\gui\Theme.cpp src\gui\BackgroundImage.cpp src\gui\UiSkin.cpp src\gui\Settings.cpp src\gui\ControlServer.cpp %CORE% %MIDI% %AUDIO% %SEQ% %PDFTAB% %GUITAR% %MAPPING% %PROJECT% %VST% %IMGUI% %GUILIBS% build\app.res /Fe:build\MidiPro.exe /Fo:build\ /link /SUBSYSTEM:WINDOWS
 if errorlevel 1 ( echo [ERROR] GUI build failed & exit /b 1 )
 
 echo === Building console app (MidiProConsole.exe) ===
@@ -56,6 +56,8 @@ cl %CFLAGS% %INC% tests\test_vstpreset.cpp src\vst\VstPreset.cpp /Fe:build\MidiP
 if errorlevel 1 ( echo [ERROR] vst preset test build failed & exit /b 1 )
 cl %CFLAGS% %INC% tests\test_releasenotes.cpp /Fe:build\MidiProNotesTests.exe /Fo:build\
 if errorlevel 1 ( echo [ERROR] release notes test build failed & exit /b 1 )
+cl %CFLAGS% %INC% tests\test_stringtab.cpp /Fe:build\MidiProStringTabTests.exe /Fo:build\
+if errorlevel 1 ( echo [ERROR] string tab test build failed & exit /b 1 )
 build\MidiProTests.exe
 if errorlevel 1 ( echo [ERROR] midi tests failed & exit /b 1 )
 build\MidiProSeqTests.exe
@@ -76,6 +78,8 @@ build\MidiProPresetTests.exe
 if errorlevel 1 ( echo [ERROR] vst preset tests failed & exit /b 1 )
 build\MidiProNotesTests.exe
 if errorlevel 1 ( echo [ERROR] release notes tests failed & exit /b 1 )
+build\MidiProStringTabTests.exe
+if errorlevel 1 ( echo [ERROR] string tab tests failed & exit /b 1 )
 
 echo [OK] build\MidiPro.exe
 endlocal

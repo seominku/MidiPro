@@ -1689,7 +1689,8 @@ int App::run() {
         themed(kWinVst, &drawVst);
         themed(kWinGuitarHelper, &drawGuitarHelper);
         themed(kWinMonitor, &drawMonitor);
-        drawBrowser(m_state); // 좌측 브라우저 (악기·이펙트·최근)
+        drawStringTab(m_state); // 줄 편집기 (기타 6줄 / 베이스 4줄)
+        drawBrowser(m_state);   // 좌측 브라우저 (악기·이펙트·최근)
         // 업데이트 내용이 떠 있는 동안은 시작 화면을 미룬다 — 시작 화면이
         // 모달이라 먼저 뜨면 뒤에 깔린 이 창을 누를 수 없다.
         drawWhatsNew(m_state);

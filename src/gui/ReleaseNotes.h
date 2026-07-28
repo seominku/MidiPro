@@ -19,7 +19,7 @@
 
 namespace midipro::gui {
 
-inline constexpr const char* kAppVersion = "1.3.6";
+inline constexpr const char* kAppVersion = "1.4.0";
 
 struct ReleaseNote {
     const char* version;
@@ -27,6 +27,16 @@ struct ReleaseNote {
 };
 
 // ---- 버전별 항목 (최신이 앞) ----
+inline const char* const kNotes140[] = {
+    "줄 편집기가 생겼습니다 (Tool > 줄 편집기). 기타는 6줄, 베이스는 4줄 격자에서 "
+    "노트를 직접 찍고 옮깁니다.",
+    "줄 위에서만 찍히니 악기가 못 내는 음이 섞이지 않습니다 — 샘플 기타/베이스는 "
+    "실제 음역 밖의 음에서 아무 소리도 내지 않습니다.",
+    "클릭=찍기, 드래그=이동(위아래로 줄 바꾸기), 휠=프렛 조절, 우클릭=삭제.",
+    "'음역 밖 노트 맞추기'로 피아노 롤에서 찍은 음을 옥타브 단위로 끌어올 수 있습니다.",
+    "트랙마다 튜닝을 정할 수 있고 프로젝트에 함께 저장됩니다.",
+    nullptr,
+};
 inline const char* const kNotes136[] = {
     "지난 버전들의 변경 내용도 모두 담았습니다 — 도움말 > 업데이트 내용 에서 처음(1.0)까지 볼 수 있습니다.",
     nullptr,
@@ -101,7 +111,7 @@ inline const char* const kNotes10[] = {
 
 inline const ReleaseNote* releaseNotes(std::size_t& count) {
     static const ReleaseNote kAll[] = {
-        {"1.3.6", kNotes136}, {"1.3.5", kNotes135}, {"1.3.4", kNotes134},
+        {"1.4.0", kNotes140}, {"1.3.6", kNotes136}, {"1.3.5", kNotes135}, {"1.3.4", kNotes134},
         {"1.3.3", kNotes133}, {"1.3.2", kNotes132}, {"1.3.1", kNotes131},
         {"1.3.0", kNotes130}, {"1.2.1", kNotes121}, {"1.1", kNotes11},
         {"1.0", kNotes10},
