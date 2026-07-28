@@ -41,6 +41,8 @@ MidiPro 실행 파일은 이 순서로 찾습니다:
 | `midipro_add_chords` | 코드 심볼로 화음 찍기 (`["C","Am","F","G7"]`) |
 | `midipro_add_drums` | 스텝 문자열로 드럼 패턴 찍기 |
 | `midipro_set_tempo` | 기본 템포(BPM) 바꾸기 |
+| `midipro_import_midi` | `.mid` 파일 가져오기 (새 트랙들로 또는 한 트랙에 합치기) |
+| `midipro_export_midi` | 프로젝트를 표준 `.mid`(포맷 1)로 내보내기 |
 | `midipro_open` | 만든 프로젝트를 MidiPro로 열기 |
 | `midipro_status` | 설치·실행 상태, 스캔된 VST3 목록, 최근 프로젝트 |
 
@@ -83,6 +85,23 @@ MidiPro 피아노 롤과 같은 기준입니다 (**C4 = 60**, A0 = 21, C8 = 108)
 4. midipro_add_drums       track="드럼"    pattern={kick:"x---x---",snare:"----x---"}  repeat=4
 5. midipro_open            path=D:\곡\demo.midipro
 ```
+
+## MIDI 파일 주고받기
+
+```
+midipro_import_midi  path=곡.midipro  midiPath=받은파일.mid
+    -> MIDI의 트랙/채널마다 새 트랙을 만든다 (포맷 0이면 채널별로 나눈다)
+midipro_import_midi  path=곡.midipro  midiPath=드럼.mid  track="드럼"  startBeat=8
+    -> 기존 트랙 하나에 8박 위치부터 합친다
+
+midipro_export_midi  path=곡.midipro  midiPath=내보내기.mid
+    -> 포맷 1 .mid (트랙 0 = 템포 트랙). 다른 DAW로 옮길 때
+```
+
+지원 범위는 앱의 `sequencer/SmfFile.cpp`와 같습니다: 포맷 0/1, PPQN 분해능
+(SMPTE는 거부), 러닝 스테이터스, 템포·트랙 이름 메타, 채널 보이스 메시지.
+노트뿐 아니라 CC·피치벤드·프로그램 체인지도 함께 오갑니다.
+오디오 클립과 VST 설정은 MIDI 포맷에 담기지 않습니다.
 
 ## 주의
 

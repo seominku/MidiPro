@@ -251,6 +251,148 @@ const GM_DRUMS = {
 };
 
 // ------------------------------------------------------------------
+// SMF(.mid) 읽기/쓰기
+//
+// 앱의 sequencer/SmfFile.cpp와 같은 범위를 맞춘다: 포맷 0/1, PPQN 분해능
+// (SMPTE는 거부), 러닝 스테이터스, 템포·트랙 이름 메타, 채널 보이스 메시지.
+// 쓰기는 포맷 1(트랙 0 = 템포 트랙)이고 러닝 스테이터스를 쓰지 않는다 —
+// 몇 바이트 아끼자고 호환성 위험을 지지 않는다.
+// ------------------------------------------------------------------
+function readVlq(buf, pos) {
+    let value = 0, b, n = 0;
+    do {
+        if (pos >= buf.length) throw new Error('MIDI 파일이 중간에 끊겼습니다 (VLQ)');
+        b = buf[pos++];
+        value = (value << 7) | (b & 0x7f);
+    } while ((b & 0x80) && ++n < 4);
+    return [value, pos];
+}
+
+function writeVlq(out, value) {
+    let v = value >>> 0;
+    let buffer = v & 0x7f;
+    while ((v >>>= 7) > 0) {
+        buffer = ((buffer << 8) | 0x80 | (v & 0x7f)) >>> 0;
+    }
+    for (;;) {
+        out.push(buffer & 0xff);
+        if (buffer & 0x80) buffer >>>= 8;
+        else break;
+    }
+}
+
+function parseSmfTrack(buf, pos, end) {
+    let tick = 0, running = 0, name = '';
+    const events = [], tempos = [];
+    while (pos < end) {
+        let dt;
+        [dt, pos] = readVlq(buf, pos);
+        tick += dt;
+        if (pos >= end) break;
+        let status = buf[pos];
+        if (status & 0x80) { pos++; running = status; }
+        else { status = running; if (!status) break; } // 러닝 스테이터스
+        if (status === 0xff) {
+            const type = buf[pos++];
+            let len;
+            [len, pos] = readVlq(buf, pos);
+            const data = buf.subarray(pos, pos + len);
+            pos += len;
+            if (type === 0x03 && !name) name = data.toString('utf8').replace(/\0/g, '').trim();
+            else if (type === 0x51 && len === 3) tempos.push({ tick, us: (data[0] << 16) | (data[1] << 8) | data[2] });
+        } else if (status === 0xf0 || status === 0xf7) {
+            let len;
+            [len, pos] = readVlq(buf, pos);
+            pos += len; // SysEx는 버린다 (앱도 곡 데이터로 쓰지 않는다)
+        } else {
+            const hi = status & 0xf0;
+            const d1 = buf[pos++];
+            const d2 = (hi === 0xc0 || hi === 0xd0) ? 0 : buf[pos++];
+            events.push({ tick, status, d1, d2 });
+        }
+    }
+    return { name, events, tempos };
+}
+
+function parseSmf(buf) {
+    if (buf.length < 14 || buf.toString('ascii', 0, 4) !== 'MThd')
+        throw new Error('MIDI 파일이 아닙니다 (MThd 헤더 없음)');
+    const headLen = buf.readUInt32BE(4);
+    const format = buf.readUInt16BE(8);
+    const division = buf.readInt16BE(12);
+    if (division <= 0)
+        throw new Error('SMPTE 타임코드 MIDI는 지원하지 않습니다 (PPQN 분해능만 가능) — 앱도 같습니다');
+    let pos = 8 + headLen;
+    const tracks = [];
+    while (pos + 8 <= buf.length) {
+        const id = buf.toString('ascii', pos, pos + 4);
+        const len = buf.readUInt32BE(pos + 4);
+        pos += 8;
+        const end = Math.min(pos + len, buf.length);
+        if (id === 'MTrk') tracks.push(parseSmfTrack(buf, pos, end));
+        pos = end;
+    }
+    if (!tracks.length) throw new Error('MIDI 파일에 트랙(MTrk)이 없습니다');
+    return { format, division, tracks };
+}
+
+// events: {tick, status, d1, d2} 또는 {tick, meta, data}
+function buildSmfTrack(events, name) {
+    const body = [];
+    if (name) {
+        const nb = Buffer.from(name, 'utf8');
+        writeVlq(body, 0);
+        body.push(0xff, 0x03);
+        writeVlq(body, nb.length);
+        for (const b of nb) body.push(b);
+    }
+    let prev = 0;
+    for (const e of events) {
+        writeVlq(body, Math.max(0, e.tick - prev));
+        prev = e.tick;
+        if (e.meta !== undefined) {
+            body.push(0xff, e.meta);
+            writeVlq(body, e.data.length);
+            for (const b of e.data) body.push(b);
+        } else {
+            const hi = e.status & 0xf0;
+            body.push(e.status & 0xff, e.d1 & 0x7f);
+            if (hi !== 0xc0 && hi !== 0xd0) body.push(e.d2 & 0x7f);
+        }
+    }
+    writeVlq(body, 0);
+    body.push(0xff, 0x2f, 0x00); // End of Track
+    const head = Buffer.alloc(8);
+    head.write('MTrk', 0, 'ascii');
+    head.writeUInt32BE(body.length, 4);
+    return Buffer.concat([head, Buffer.from(body)]);
+}
+
+function projectToSmf(proj, which) {
+    const ppqn = projectPpqn(proj);
+    const bpm = Number(getGlobal(proj.song.globals, 'bpm', '120')) || 120;
+    const us = Math.round(60000000 / bpm);
+    const chunks = [buildSmfTrack([
+        { tick: 0, meta: 0x51, data: [(us >> 16) & 0xff, (us >> 8) & 0xff, us & 0xff] },
+        { tick: 0, meta: 0x58, data: [4, 2, 24, 8] },
+    ], 'Tempo')];
+    let notes = 0;
+    proj.song.tracks.forEach((t, i) => {
+        if (which && !which.includes(i)) return;
+        const evs = [...t.evs].sort((a, b) => a.tick - b.tick || evRank(a) - evRank(b));
+        notes += evs.filter((e) => (e.status & 0xf0) === 0x90 && e.d2 > 0).length;
+        chunks.push(buildSmfTrack(evs, t.name));
+    });
+    const head = Buffer.alloc(14);
+    head.write('MThd', 0, 'ascii');
+    head.writeUInt32BE(6, 4);
+    head.writeUInt16BE(1, 8);              // 포맷 1
+    head.writeUInt16BE(chunks.length, 10);
+    head.writeUInt16BE(ppqn, 12);
+    return { buffer: Buffer.concat([head, ...chunks]), notes, trackChunks: chunks.length };
+}
+
+// ------------------------------------------------------------------
 // MidiPro 실행 파일 찾기
 // ------------------------------------------------------------------
 function findMidiProExe() {
@@ -668,6 +810,127 @@ const TOOLS = {
             setGlobal(proj.song.globals, 'bpm', bpm);
             saveProjectFile(file, proj);
             return `템포를 ${old} -> ${bpm} BPM으로 바꿨습니다 — ${file}`;
+        },
+    },
+
+    // --- MIDI 파일 가져오기 ----------------------------------------------
+    midipro_import_midi: {
+        description:
+            '.mid 파일을 프로젝트로 가져온다. track을 주면 그 트랙에 합치고, 안 주면 MIDI의 트랙/채널마다 ' +
+            '새 트랙을 만든다. 노트 외의 채널 메시지(CC, 피치벤드, 프로그램 체인지)도 함께 가져온다.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                path: { type: 'string', description: '가져올 대상 .midipro 파일' },
+                midiPath: { type: 'string', description: '읽을 .mid 파일' },
+                track: { description: '이 트랙에 합치기 (번호 또는 이름). 생략하면 새 트랙들을 만든다' },
+                startBeat: { type: 'number', description: '이 위치부터 놓기 (박, 기본 0)' },
+                applyTempo: { type: 'boolean', description: 'MIDI의 첫 템포를 프로젝트 템포로 적용 (기본 true)' },
+            },
+            required: ['path', 'midiPath'],
+        },
+        run(args) {
+            const midiFile = path.resolve(String(args.midiPath));
+            if (!existsSync(midiFile)) throw new Error(`MIDI 파일이 없습니다: ${midiFile}`);
+            const file = path.resolve(String(args.path));
+            const proj = loadProjectFile(file);
+            const ppqn = projectPpqn(proj);
+            const smf = parseSmf(readFileSync(midiFile));
+            const scale = ppqn / smf.division;
+            const offset = Math.round((args.startBeat === undefined ? 0 : requireNum(args.startBeat, 'startBeat', { min: 0 })) * ppqn);
+
+            // 소스 트랙 + 채널로 묶는다 — 포맷 0은 한 트랙에 여러 채널이 섞여 있다.
+            const groups = new Map();
+            for (const [si, st] of smf.tracks.entries())
+                for (const e of st.events) {
+                    const ch = e.status & 0x0f;
+                    const key = `${si}:${ch}`;
+                    if (!groups.has(key)) groups.set(key, { srcName: st.name, channel: ch, events: [] });
+                    groups.get(key).events.push(e);
+                }
+            if (groups.size === 0) throw new Error('MIDI 파일에 연주 데이터(채널 메시지)가 없습니다');
+
+            const rescale = (e, ch) => ({
+                tick: Math.round(e.tick * scale) + offset,
+                status: (e.status & 0xf0) | (ch & 0x0f), d1: e.d1, d2: e.d2,
+            });
+            const countNotes = (evs) => evs.filter((e) => (e.status & 0xf0) === 0x90 && e.d2 > 0).length;
+
+            const report = [];
+            let total = 0;
+            if (args.track !== undefined && args.track !== null) {
+                const ti = resolveTrack(proj.song, args.track);
+                const t = proj.song.tracks[ti];
+                for (const g of groups.values())
+                    for (const e of g.events) t.evs.push(rescale(e, t.channel));
+                total = [...groups.values()].reduce((s, g) => s + countNotes(g.events), 0);
+                report.push(`"${t.name}" 트랙에 합침`);
+            } else {
+                // 같은 소스 트랙이 여러 채널을 쓰면 이름 뒤에 채널을 붙여 구분한다
+                const perSrc = new Map();
+                for (const [key, g] of groups) {
+                    const si = key.split(':')[0];
+                    perSrc.set(si, (perSrc.get(si) ?? 0) + 1);
+                }
+                let n = 0;
+                for (const [key, g] of groups) {
+                    const si = key.split(':')[0];
+                    const base = g.srcName || `MIDI ${++n}`;
+                    const name = perSrc.get(si) > 1 ? `${base} ch${g.channel + 1}` : base;
+                    const t = makeTrackBlock({ name, channel: g.channel });
+                    t.channel = g.channel; // 드럼 채널(9)도 그대로 살린다
+                    for (const e of g.events) t.evs.push(rescale(e, g.channel));
+                    proj.song.tracks.push(t);
+                    const c = countNotes(g.events);
+                    total += c;
+                    report.push(`[${proj.song.tracks.length - 1}] ${name} — 채널 ${g.channel + 1}, 노트 ${c}개`);
+                }
+            }
+
+            const tempos = smf.tracks.flatMap((t) => t.tempos).sort((a, b) => a.tick - b.tick);
+            let tempoMsg = '';
+            if ((args.applyTempo ?? true) && tempos.length) {
+                const bpm = Math.round((60000000 / tempos[0].us) * 1000) / 1000;
+                const old = getGlobal(proj.song.globals, 'bpm', '120');
+                setGlobal(proj.song.globals, 'bpm', bpm);
+                tempoMsg = `\n템포: ${old} -> ${bpm} BPM (MIDI 파일 기준)`;
+            }
+            saveProjectFile(file, proj);
+            return `MIDI를 가져왔습니다: ${path.basename(midiFile)} ` +
+                   `(포맷 ${smf.format}, ppqn ${smf.division} -> ${ppqn}, 노트 ${total}개)\n` +
+                   report.join('\n') + tempoMsg + `\n— ${file}`;
+        },
+    },
+
+    // --- MIDI 파일 내보내기 ----------------------------------------------
+    midipro_export_midi: {
+        description:
+            '프로젝트를 표준 .mid 파일(포맷 1)로 내보낸다. 다른 DAW로 옮기거나 공유할 때 쓴다. ' +
+            '오디오 클립·VST 설정은 담기지 않는다 (MIDI 포맷에 그런 개념이 없다).',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                path: { type: 'string', description: '읽을 .midipro 파일' },
+                midiPath: { type: 'string', description: '만들 .mid 파일 경로' },
+                tracks: { type: 'array', items: { type: 'integer' }, description: '내보낼 트랙 번호들 (생략하면 전부)' },
+                overwrite: { type: 'boolean', description: '기존 .mid 덮어쓰기 (기본 false)' },
+            },
+            required: ['path', 'midiPath'],
+        },
+        run(args) {
+            const file = path.resolve(String(args.path));
+            const out = path.resolve(String(args.midiPath));
+            if (existsSync(out) && !args.overwrite)
+                throw new Error(`이미 있는 파일입니다: ${out} (덮어쓰려면 overwrite=true)`);
+            const proj = loadProjectFile(file);
+            const which = Array.isArray(args.tracks) && args.tracks.length
+                ? args.tracks.map((i) => resolveTrack(proj.song, i)) : null;
+            const { buffer, notes, trackChunks } = projectToSmf(proj, which);
+            mkdirSync(path.dirname(out), { recursive: true });
+            writeFileSync(out, buffer);
+            return `MIDI로 내보냈습니다: ${out}\n` +
+                   `포맷 1, ppqn ${projectPpqn(proj)}, 템포 ${getGlobal(proj.song.globals, 'bpm', '120')} BPM, ` +
+                   `트랙 ${trackChunks}개(템포 트랙 포함), 노트 ${notes}개, ${buffer.length}바이트`;
         },
     },
 

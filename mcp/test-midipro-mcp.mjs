@@ -88,7 +88,7 @@ try {
 
     const list = await c.request('tools/list', {});
     const names = (list.result?.tools ?? []).map((t) => t.name);
-    check(names.length === 9, `도구 9개를 노출한다 (실제 ${names.length}개)`);
+    check(names.length === 11, `도구 11개를 노출한다 (실제 ${names.length}개)`);
     check(names.every((n) => n.startsWith('midipro_')), '도구 이름이 모두 midipro_ 로 시작한다');
     check((list.result?.tools ?? []).every((t) => t.inputSchema?.type === 'object'),
           '모든 도구가 object 스키마를 갖는다');
@@ -256,6 +256,98 @@ try {
     check(r.isError && /프로젝트 파일이 아닙니다/.test(r.text), '다른 파일을 거부한다');
     r = await c.call('midipro_add_notes', { path: proj, track: 0, notes: [] });
     check(r.isError, '빈 노트 배열을 거부한다');
+
+    console.log('--- MIDI 내보내기/가져오기 ---');
+    const mid = path.join(dir, 'out.mid');
+    r = await c.call('midipro_export_midi', { path: proj, midiPath: mid });
+    check(!r.isError && existsSync(mid), '.mid 파일을 내보낸다');
+    const mb = readFileSync(mid);
+    check(mb.toString('ascii', 0, 4) === 'MThd', 'MThd 헤더로 시작한다');
+    check(mb.readUInt32BE(4) === 6, '헤더 길이가 6');
+    check(mb.readUInt16BE(8) === 1, '포맷 1로 쓴다');
+    check(mb.readUInt16BE(12) === 480, 'division이 프로젝트 ppqn(480)과 같다');
+    check(mb.readUInt16BE(10) === 5, '트랙 청크 5개 (템포 + 트랙 4개)');
+    check(mb.toString('ascii', 14, 18) === 'MTrk', '첫 청크가 MTrk');
+    check(mb.includes(Buffer.from([0xff, 0x2f, 0x00])), 'End of Track 메타가 들어 있다');
+
+    r = await c.call('midipro_export_midi', { path: proj, midiPath: mid });
+    check(r.isError && /이미 있는 파일/.test(r.text), '.mid 덮어쓰기 보호가 동작한다');
+
+    // 왕복: 내보낸 .mid를 새 프로젝트로 다시 가져와 노트가 살아있는지 본다
+    const rt = path.join(dir, 'roundtrip.midipro');
+    await c.call('midipro_create_project', { path: rt, bpm: 120 });
+    r = await c.call('midipro_import_midi', { path: rt, midiPath: mid });
+    check(!r.isError, '내보낸 .mid를 다시 가져온다');
+    const back = JSON.parse((await c.call('midipro_read_project', { path: rt })).text);
+    const origInfo = JSON.parse((await c.call('midipro_read_project', { path: proj })).text);
+    check(back.totalNotes === origInfo.totalNotes,
+          `왕복 후 노트 수가 같다 (원본 ${origInfo.totalNotes} / 왕복 ${back.totalNotes})`);
+    check(back.bpm === 128, '가져오기가 MIDI의 템포(128)를 적용한다');
+    check(back.tracks.some((t) => t.channel === 9), '드럼 채널(10)이 유지된다');
+    check(back.tracks.some((t) => t.name === '피아노'), '트랙 이름 메타가 왕복한다');
+
+    // 노트 하나의 위치·길이가 정확히 살아남는가
+    const rtPiano = back.tracks.find((t) => t.name === '피아노');
+    const one2 = JSON.parse((await c.call('midipro_read_project',
+        { path: rt, includeNotes: true, track: rtPiano.index })).text);
+    const n0 = one2.tracks[rtPiano.index].notes[0];
+    check(n0.pitch === 'C4' && n0.startBeat === 0 && n0.durationBeats === 1,
+          '왕복 후 첫 노트가 C4 / 0박 / 1박 그대로');
+
+    // 한 트랙으로 합치기
+    const merge = path.join(dir, 'merge.midipro');
+    await c.call('midipro_create_project', { path: merge, tracks: [{ name: '한트랙' }] });
+    r = await c.call('midipro_import_midi', { path: merge, midiPath: mid, track: '한트랙', startBeat: 4 });
+    check(!r.isError, 'track 지정 시 한 트랙으로 합친다');
+    const mg = JSON.parse((await c.call('midipro_read_project', { path: merge })).text);
+    check(mg.trackCount === 1, '트랙이 늘지 않는다');
+    check(mg.tracks[0].noteCount === origInfo.totalNotes, '모든 노트가 그 트랙에 들어간다');
+    check(mg.tracks[0].startBeat === 4, 'startBeat=4 만큼 밀려서 들어간다');
+
+    // 다른 ppqn으로 가져오면 틱이 환산되는가
+    const scaled = path.join(dir, 'scaled.midipro');
+    await c.call('midipro_create_project', { path: scaled, ppqn: 960 });
+    r = await c.call('midipro_import_midi', { path: scaled, midiPath: mid });
+    const sc = JSON.parse((await c.call('midipro_read_project', { path: scaled })).text);
+    check(sc.ppqn === 960 && sc.totalNotes === origInfo.totalNotes,
+          'ppqn 960 프로젝트로 가져와도 노트 수가 같다');
+    const scPiano = sc.tracks.find((t) => t.name === '피아노');
+    check(scPiano && scPiano.startBeat === 0 && Math.abs(scPiano.endBeat - origInfo.tracks[0].endBeat) < 0.01,
+          'ppqn이 달라도 박 위치가 보존된다 (틱 환산)');
+
+    // 러닝 스테이터스: 실제 MIDI 파일이 흔히 쓰지만 앱의 writer는 안 만드는 경로라
+    // 손으로 바이트를 짜서 검사한다. 상태 바이트를 생략하고 데이터만 이어 붙인 형태.
+    const runmid = path.join(dir, 'running.mid');
+    writeFileSync(runmid, Buffer.from([
+        0x4d, 0x54, 0x68, 0x64, 0, 0, 0, 6, 0, 0, 0, 1, 0x01, 0xe0, // MThd 포맷0 1트랙 division 480
+        0x4d, 0x54, 0x72, 0x6b, 0, 0, 0, 0x11,                       // MTrk 길이 17
+        0x00, 0x90, 0x3c, 0x64,   // delta 0: Note On C4 vel100 (상태 바이트 있음)
+        0x60, 0x3e, 0x64,         // delta 96: 러닝 스테이터스 -> Note On D4 vel100
+        0x00, 0x3c, 0x00,         // delta 0: 러닝 -> C4 vel0 (= Note Off 관례)
+        0x60, 0x3e, 0x00,         // delta 96: 러닝 -> D4 vel0
+        0x00, 0xff, 0x2f, 0x00,   // End of Track
+    ]));
+    const runproj = path.join(dir, 'running.midipro');
+    await c.call('midipro_create_project', { path: runproj });
+    r = await c.call('midipro_import_midi', { path: runproj, midiPath: runmid });
+    check(!r.isError, '러닝 스테이터스 MIDI를 가져온다');
+    const rn = JSON.parse((await c.call('midipro_read_project',
+        { path: runproj, includeNotes: true })).text);
+    check(rn.totalNotes === 2, `러닝 스테이터스로 이어 쓴 노트 2개를 읽는다 (${rn.totalNotes}개)`);
+    const rnotes = rn.tracks[0].notes;
+    check(rnotes?.[0]?.pitch === 'C4' && rnotes[0].startBeat === 0,
+          '첫 노트 C4가 0박에');
+    check(rnotes?.[1]?.pitch === 'D4' && Math.abs(rnotes[1].startBeat - 0.2) < 0.001,
+          '둘째 노트 D4가 96틱(0.2박)에');
+    check(Math.abs(rnotes[0].durationBeats - 0.2) < 0.001,
+          'velocity 0인 Note On을 Note Off로 인정해 길이가 나온다');
+
+    r = await c.call('midipro_import_midi', { path: rt, midiPath: path.join(dir, 'none.mid') });
+    check(r.isError && /MIDI 파일이 없습니다/.test(r.text), '없는 .mid를 잡는다');
+    const fake = path.join(dir, 'fake.mid');
+    writeFileSync(fake, 'not a midi file at all, really');
+    r = await c.call('midipro_import_midi', { path: rt, midiPath: fake });
+    check(r.isError && /MIDI 파일이 아닙니다/.test(r.text), 'MThd 없는 파일을 거부한다');
 
     console.log('--- 상태 ---');
     r = await c.call('midipro_status', {});
