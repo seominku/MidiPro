@@ -100,6 +100,28 @@ inline bool tabAssign(TabTuning t, int note, int& stringOut, int& fretOut) {
     return true;
 }
 
+// 힌트가 있으면 그 줄에, 없으면 로우 포지션에 놓는다.
+// hintTopIdx는 트랙의 TabHint::strIdx 순서(위=0, 즉 가장 높은 줄이 0)다.
+// 음수면 힌트 없음. 힌트가 그 음을 못 내는 줄이면 무시하고 자동 배정한다.
+//
+// 왜 필요한가: 그냥 로우 포지션으로만 놓으면, 프렛을 한 칸 올릴 때마다 "더 낮은
+// 프렛으로 낼 수 있는 윗줄"로 표시가 튄다. 사용자가 고른 줄에 머무르게 하려면
+// 그 줄을 기억해 우선해야 한다.
+inline bool tabPlaceWithHint(TabTuning t, int note, int hintTopIdx, int& stringOut, int& fretOut) {
+    const TuningInfo& ti = tuningInfo(t);
+    if (!ti.stringCount) return false;
+    if (hintTopIdx >= 0 && hintTopIdx < ti.stringCount) {
+        const int s = ti.stringCount - 1 - hintTopIdx; // 위=0 -> 아래=0
+        const int f = note - ti.openNotes[s];
+        if (f >= 0 && f <= ti.maxFret) {
+            stringOut = s;
+            fretOut = f;
+            return true;
+        }
+    }
+    return tabAssign(t, note, stringOut, fretOut);
+}
+
 // 음을 이 튜닝이 낼 수 있는 곳으로 옥타브 단위로 끌어온다 (못 하면 false).
 // 피아노 롤에서 찍은 음을 줄 악기 트랙에 맞출 때 쓴다.
 inline bool tabFitOctave(TabTuning t, int note, int& out) {

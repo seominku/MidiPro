@@ -71,6 +71,30 @@ int main() {
         if (tabNoteAt(TabTuning::Bass4, ss, ff) != n) { expect(false, "베이스 배정 왕복"); break; }
     }
 
+    // ---- 힌트로 줄 고정 ----
+    // 힌트 없으면 로우 포지션 (A2=45는 5번줄 개방)
+    expect(tabPlaceWithHint(TabTuning::Guitar6, 45, -1, s, f) && s == 1 && f == 0,
+           "힌트 없으면 로우 포지션");
+    // 힌트가 6번줄(위=0 순서로 5)이면 6번줄 5프렛에 머문다
+    expect(tabPlaceWithHint(TabTuning::Guitar6, 45, 5, s, f) && s == 0 && f == 5,
+           "힌트가 있으면 그 줄에 머문다");
+    // 프렛을 올려도 같은 줄: 6번줄에서 45->46->47 이 계속 6번줄
+    for (int n = 40; n <= 64; ++n) {
+        if (!tabPlaceWithHint(TabTuning::Guitar6, n, 5, s, f)) { expect(false, "힌트 배정"); break; }
+        if (s != 0) { expect(false, "힌트를 준 줄에서 벗어나지 않는다"); break; }
+    }
+    // 그 줄로 못 내는 음이면 힌트를 무시하고 자동 배정 (6번줄 24프렛 초과)
+    expect(tabPlaceWithHint(TabTuning::Guitar6, 70, 5, s, f) && s != 0,
+           "힌트로 못 내는 음은 자동 배정");
+    // 잘못된 힌트 번호는 무시
+    expect(tabPlaceWithHint(TabTuning::Guitar6, 45, 99, s, f) && s == 1 && f == 0,
+           "범위 밖 힌트는 무시");
+    // 베이스도 같다 (4줄: 위=0이 G2)
+    expect(tabPlaceWithHint(TabTuning::Bass4, 43, 3, s, f) && s == 0 && f == 15,
+           "베이스: 힌트가 4번줄이면 그 줄 15프렛");
+    expect(tabPlaceWithHint(TabTuning::Bass4, 43, -1, s, f) && s == 3 && f == 0,
+           "베이스: 힌트 없으면 1번줄 개방");
+
     // ---- 옥타브로 끌어오기 ----
     int out = -1;
     expect(tabFitOctave(TabTuning::Guitar6, 36, out) && out == 48, "기타: C2 -> C3");

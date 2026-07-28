@@ -19,7 +19,7 @@
 
 namespace midipro::gui {
 
-inline constexpr const char* kAppVersion = "1.4.1";
+inline constexpr const char* kAppVersion = "1.4.2";
 
 struct ReleaseNote {
     const char* version;
@@ -27,6 +27,11 @@ struct ReleaseNote {
 };
 
 // ---- 버전별 항목 (최신이 앞) ----
+inline const char* const kNotes142[] = {
+    "줄 편집기에서 프렛을 올려도 노트가 윗줄로 튀지 않습니다 — 고른 줄에 그대로 머뭅니다.",
+    "찍거나 옮긴 줄이 기억되어 프로젝트에 함께 저장됩니다.",
+    nullptr,
+};
 inline const char* const kNotes141[] = {
     "줄 편집기에서 노트 길이를 조절할 수 있습니다 — 노트 오른쪽 끝을 잡아 끌거나 Shift+←→.",
     "프렛 바꾸기가 제대로 먹습니다. 휠이 화면 가로 스크롤에 먹히던 문제를 고쳤고, "
@@ -118,7 +123,7 @@ inline const char* const kNotes10[] = {
 
 inline const ReleaseNote* releaseNotes(std::size_t& count) {
     static const ReleaseNote kAll[] = {
-        {"1.4.1", kNotes141}, {"1.4.0", kNotes140}, {"1.3.6", kNotes136}, {"1.3.5", kNotes135}, {"1.3.4", kNotes134},
+        {"1.4.2", kNotes142}, {"1.4.1", kNotes141}, {"1.4.0", kNotes140}, {"1.3.6", kNotes136}, {"1.3.5", kNotes135}, {"1.3.4", kNotes134},
         {"1.3.3", kNotes133}, {"1.3.2", kNotes132}, {"1.3.1", kNotes131},
         {"1.3.0", kNotes130}, {"1.2.1", kNotes121}, {"1.1", kNotes11},
         {"1.0", kNotes10},

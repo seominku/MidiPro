@@ -64,12 +64,41 @@ bool sameSpan(const seq::NoteSpan& a, const seq::NoteSpan& b) {
     return a.startTick == b.startTick && a.endTick == b.endTick && a.note == b.note;
 }
 
-// 노트를 지우고 새 자리에 다시 놓는다 (되돌리기 1회로 묶인다)
+// ---- 줄 고정(운지 힌트) ----
+// 같은 음도 줄이 여럿이라(2번줄 9프렛 = 1번줄 4프렛), 그냥 두면 프렛을 올릴 때마다
+// "가장 낮은 자리"로 다시 계산돼 윗줄로 튄다. 사용자가 고른 줄을 트랙의 tabHints에
+// 적어 두고 그 줄을 우선한다. 힌트는 프로젝트에 함께 저장된다(thint 줄).
+// 주의: TabHint::strIdx는 "위(높은 줄)=0" 순서라 우리 인덱스(아래=0)와 뒤집혀 있다.
+int hintStringIdx(const seq::Track& t, uint32_t tick, uint8_t note) {
+    for (const auto& h : t.tabHints)
+        if (h.tick == tick && h.note == note) return (int)h.strIdx;
+    return -1;
+}
+void clearHint(seq::Track& t, uint32_t tick, uint8_t note) {
+    t.tabHints.erase(std::remove_if(t.tabHints.begin(), t.tabHints.end(),
+                                    [&](const seq::Track::TabHint& h) {
+                                        return h.tick == tick && h.note == note;
+                                    }),
+                     t.tabHints.end());
+}
+void setHint(seq::Track& t, uint32_t tick, uint8_t note, int hintIdx) {
+    for (auto& h : t.tabHints)
+        if (h.tick == tick && h.note == note) {
+            h.strIdx = (uint8_t)hintIdx;
+            return;
+        }
+    t.tabHints.push_back({tick, note, (uint8_t)hintIdx});
+}
+
+// 노트를 지우고 새 자리에 다시 놓는다 (되돌리기 1회로 묶인다).
+// keepString이 0 이상이면 그 줄에 머무르도록 힌트를 옮겨 적는다.
 void replaceNote(AppState& state, seq::Track& track, const seq::NoteSpan& oldSpan, uint32_t start,
-                 uint32_t len, int note, uint8_t vel) {
+                 uint32_t len, int note, uint8_t vel, int keepHintIdx = -1) {
     state.snapshot();
     seq::removeNote(track, oldSpan);
+    clearHint(track, oldSpan.startTick, oldSpan.note);
     track.addNote(start, std::max<uint32_t>(len, 1), (uint8_t)note, vel);
+    if (keepHintIdx >= 0) setHint(track, start, (uint8_t)note, keepHintIdx);
     refreshPlaybackIfPlaying(state);
 }
 
@@ -216,10 +245,17 @@ void drawStringTab(AppState& state) {
     const ImVec2 mouse = ImGui::GetIO().MousePos;
     int hitIdx = -1, hitEdge = -1;
 
+    // 화면 줄 인덱스(위=0) <-> 우리 줄 인덱스(아래=0)
+    const auto toHint = [&](int s) { return ti.stringCount - 1 - s; };
+    // 그 노트가 어느 줄에 놓일지: 고정 힌트가 있으면 그 줄, 없으면 가장 낮은 자리
+    const auto placeOf = [&](const seq::NoteSpan& n, int& s, int& fret) {
+        return tabPlaceWithHint(tuning, n.note, hintStringIdx(track, n.startTick, n.note), s, fret);
+    };
+
     for (std::size_t i = 0; i < notes.size(); ++i) {
         const auto& n = notes[i];
         int s = 0, fret = 0;
-        const bool ok = tabAssign(tuning, n.note, s, fret);
+        const bool ok = placeOf(n, s, fret);
         const int r = ok ? (ti.stringCount - 1 - s) : 0;
         const float y = gridTop + rowH * (float)r + rowH * 0.5f;
         const float xa = x0 + (float)n.startTick * zoom;
@@ -255,10 +291,12 @@ void drawStringTab(AppState& state) {
         if (hitIdx >= 0 && wheel != 0.0f) {
             const auto& n = notes[(std::size_t)hitIdx];
             int s = 0, f = 0;
-            if (tabAssign(tuning, n.note, s, f)) {
+            if (placeOf(n, s, f)) {
+                // 그 줄에 머무른다 — 프렛만 바꾸고 줄은 고정한다
                 const int nn = tabNoteAt(tuning, s, f + (wheel > 0 ? 1 : -1));
                 if (nn > 0) {
-                    replaceNote(state, track, n, n.startTick, n.endTick - n.startTick, nn, n.velocity);
+                    replaceNote(state, track, n, n.startTick, n.endTick - n.startTick, nn,
+                                n.velocity, toHint(s));
                     g_ed.hasSel = true;
                     g_ed.span = {n.startTick, n.endTick, (uint8_t)nn, n.velocity};
                 }
@@ -268,7 +306,7 @@ void drawStringTab(AppState& state) {
             if (hitIdx >= 0) {
                 const auto& n = notes[(std::size_t)hitIdx];
                 int s = 0, f = 0;
-                tabAssign(tuning, n.note, s, f);
+                placeOf(n, s, f);
                 g_ed.mode = (hitEdge == 1) ? EditMode::Resize : EditMode::Move;
                 g_ed.span = n;
                 g_ed.fret = f;
@@ -282,6 +320,7 @@ void drawStringTab(AppState& state) {
                     const uint32_t st = snap(tickAt(mouse.x));
                     state.snapshot();
                     track.addNote(st, noteLen, (uint8_t)nn, 100);
+                    setHint(track, st, (uint8_t)nn, toHint(s)); // 찍은 줄에 고정
                     refreshPlaybackIfPlaying(state);
                     g_ed.hasSel = true;
                     g_ed.span = {st, st + noteLen, (uint8_t)nn, 100};
@@ -291,7 +330,9 @@ void drawStringTab(AppState& state) {
         }
         if (hitIdx >= 0 && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
             state.snapshot();
-            seq::removeNote(track, notes[(std::size_t)hitIdx]);
+            const auto& dn = notes[(std::size_t)hitIdx];
+            seq::removeNote(track, dn);
+            clearHint(track, dn.startTick, dn.note);
             refreshPlaybackIfPlaying(state);
             g_ed.hasSel = false;
         }
@@ -305,7 +346,7 @@ void drawStringTab(AppState& state) {
             // 미리보기
             if (g_ed.mode == EditMode::Resize) {
                 int s = 0, f = 0;
-                tabAssign(tuning, g_ed.span.note, s, f);
+                placeOf(g_ed.span, s, f);
                 const float y = gridTop + rowH * (float)(ti.stringCount - 1 - s) + rowH * 0.5f;
                 const uint32_t end = std::max(snap(curTick), g_ed.span.startTick + snapTicks);
                 dl->AddRect(ImVec2(x0 + (float)g_ed.span.startTick * zoom, y - rowH * 0.4f),
@@ -326,8 +367,10 @@ void drawStringTab(AppState& state) {
                 const uint32_t end = std::max(snap(curTick), g_ed.span.startTick + snapTicks);
                 const uint32_t len = end - g_ed.span.startTick;
                 if (len != oldLen) {
+                    int s = 0, f = 0;
+                    placeOf(g_ed.span, s, f);
                     replaceNote(state, track, g_ed.span, g_ed.span.startTick, len, g_ed.span.note,
-                                g_ed.span.velocity);
+                                g_ed.span.velocity, toHint(s));
                     g_ed.span.endTick = g_ed.span.startTick + len;
                 }
             } else {
@@ -337,7 +380,9 @@ void drawStringTab(AppState& state) {
                     const int nn = tabNoteAt(tuning, s, g_ed.fret);
                     const uint32_t st = snap(curTick > g_ed.grabTick ? curTick - g_ed.grabTick : 0);
                     if (nn > 0 && (nn != g_ed.span.note || st != g_ed.span.startTick)) {
-                        replaceNote(state, track, g_ed.span, st, oldLen, nn, g_ed.span.velocity);
+                        // 놓은 줄에 고정 (프렛은 잡을 때 값을 유지)
+                        replaceNote(state, track, g_ed.span, st, oldLen, nn, g_ed.span.velocity,
+                                    toHint(s));
                         g_ed.span = {st, st + oldLen, (uint8_t)nn, g_ed.span.velocity};
                     }
                 }
@@ -357,12 +402,14 @@ void drawStringTab(AppState& state) {
             g_ed.hasSel = false;
         } else {
             int s = 0, f = 0;
-            tabAssign(tuning, g_ed.span.note, s, f);
+            placeOf(g_ed.span, s, f);
             const uint32_t len = g_ed.span.endTick - g_ed.span.startTick;
+            // 프렛만 바꾸고 줄은 그대로 둔다 (윗줄로 튀지 않게)
             const auto setFret = [&](int nf) {
                 const int nn = tabNoteAt(tuning, s, nf);
                 if (nn <= 0) return;
-                replaceNote(state, track, g_ed.span, g_ed.span.startTick, len, nn, g_ed.span.velocity);
+                replaceNote(state, track, g_ed.span, g_ed.span.startTick, len, nn,
+                            g_ed.span.velocity, toHint(s));
                 g_ed.span.note = (uint8_t)nn;
             };
             if (ImGui::IsKeyPressed(ImGuiKey_UpArrow, true)) { setFret(f + 1); g_ed.fretTyping = -1; }
@@ -370,27 +417,27 @@ void drawStringTab(AppState& state) {
             // 길이: Shift+좌우 = 늘이기/줄이기, 좌우 = 이동
             const bool shift = ImGui::GetIO().KeyShift;
             if (ImGui::IsKeyPressed(ImGuiKey_RightArrow, true)) {
-                if (shift)
+                if (shift) { // 길이 늘이기
                     replaceNote(state, track, g_ed.span, g_ed.span.startTick, len + snapTicks,
-                                g_ed.span.note, g_ed.span.velocity),
-                        g_ed.span.endTick += snapTicks;
-                else {
+                                g_ed.span.note, g_ed.span.velocity, toHint(s));
+                    g_ed.span.endTick += snapTicks;
+                } else { // 뒤로 이동
                     replaceNote(state, track, g_ed.span, g_ed.span.startTick + snapTicks, len,
-                                g_ed.span.note, g_ed.span.velocity);
+                                g_ed.span.note, g_ed.span.velocity, toHint(s));
                     g_ed.span.startTick += snapTicks;
                     g_ed.span.endTick += snapTicks;
                 }
             }
             if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow, true)) {
-                if (shift) {
+                if (shift) { // 길이 줄이기
                     if (len > snapTicks) {
                         replaceNote(state, track, g_ed.span, g_ed.span.startTick, len - snapTicks,
-                                    g_ed.span.note, g_ed.span.velocity);
+                                    g_ed.span.note, g_ed.span.velocity, toHint(s));
                         g_ed.span.endTick -= snapTicks;
                     }
-                } else if (g_ed.span.startTick >= snapTicks) {
+                } else if (g_ed.span.startTick >= snapTicks) { // 앞으로 이동
                     replaceNote(state, track, g_ed.span, g_ed.span.startTick - snapTicks, len,
-                                g_ed.span.note, g_ed.span.velocity);
+                                g_ed.span.note, g_ed.span.velocity, toHint(s));
                     g_ed.span.startTick -= snapTicks;
                     g_ed.span.endTick -= snapTicks;
                 }
@@ -399,6 +446,7 @@ void drawStringTab(AppState& state) {
                 ImGui::IsKeyPressed(ImGuiKey_Backspace, false)) {
                 state.snapshot();
                 seq::removeNote(track, g_ed.span);
+                clearHint(track, g_ed.span.startTick, g_ed.span.note);
                 refreshPlaybackIfPlaying(state);
                 g_ed.hasSel = false;
             }
