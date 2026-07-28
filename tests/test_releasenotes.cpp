@@ -70,8 +70,24 @@ int main() {
     // ---- 몇 개 보여줄까 ----
     expect(newNoteCount("") == 1, "처음 실행이면 최신 하나만");
     expect(newNoteCount(kAppVersion) == 0, "같은 버전이면 없음");
-    expect(newNoteCount("1.3.0") == n - 1, "1.3.0을 봤으면 그보다 새 것 전부");
     expect(newNoteCount("0.0.1") == n, "아주 옛 버전이면 전부");
+
+    // 옛 버전들도 담겨 있는지 (1.0까지 이력이 있어야 한다)
+    bool has10 = false, has11 = false, has121 = false;
+    for (std::size_t i = 0; i < n; ++i) {
+        if (std::strcmp(all[i].version, "1.0") == 0) has10 = true;
+        if (std::strcmp(all[i].version, "1.1") == 0) has11 = true;
+        if (std::strcmp(all[i].version, "1.2.1") == 0) has121 = true;
+    }
+    expect(has10 && has11 && has121, "1.0 / 1.1 / 1.2.1 이력이 들어 있다");
+    expect(n >= 10, "버전 항목이 10개 이상");
+
+    // 1.3.5를 본 사용자는 그 뒤 버전만 본다 (옛 이력이 다시 뜨지 않는다)
+    std::size_t after135 = 0;
+    for (std::size_t i = 0; i < n; ++i)
+        if (versionCompare("1.3.5", all[i].version) < 0) ++after135;
+    expect(newNoteCount("1.3.5") == after135, "1.3.5 이후 것만 센다");
+    expect(newNoteCount("1.3.5") < n, "옛 이력까지 다시 보여주지 않는다");
 
     if (g_fail) {
         std::printf("[FAIL] release notes tests failed (%d)\n", g_fail);

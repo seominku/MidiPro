@@ -388,6 +388,8 @@ struct AppState {
     // 업데이트 내용 창. lastSeenVersion은 "이 버전 알림을 봤다"는 표시로
     // settings.ini에 저장된다 — 새 버전으로 처음 켤 때만 창이 뜬다.
     bool showWhatsNew = false;
+    // 도움말 메뉴로 열었으면 전체 이력을, 시작할 때 자동으로 떴으면 새 것만 보여준다.
+    bool whatsNewAll = false;
     std::string lastSeenVersion;
 
     // ---- UI 테마 (개인설정 > 테마) ----

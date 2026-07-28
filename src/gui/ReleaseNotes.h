@@ -19,7 +19,7 @@
 
 namespace midipro::gui {
 
-inline constexpr const char* kAppVersion = "1.3.5";
+inline constexpr const char* kAppVersion = "1.3.6";
 
 struct ReleaseNote {
     const char* version;
@@ -27,6 +27,10 @@ struct ReleaseNote {
 };
 
 // ---- 버전별 항목 (최신이 앞) ----
+inline const char* const kNotes136[] = {
+    "지난 버전들의 변경 내용도 모두 담았습니다 — 도움말 > 업데이트 내용 에서 처음(1.0)까지 볼 수 있습니다.",
+    nullptr,
+};
 inline const char* const kNotes135[] = {
     "업데이트하면 이 창이 떠서 무엇이 바뀌었는지 알려줍니다.",
     "도움말 > 업데이트 내용 에서 언제든 다시 볼 수 있습니다.",
@@ -65,10 +69,42 @@ inline const char* const kNotes130[] = {
     nullptr,
 };
 
+inline const char* const kNotes121[] = {
+    "무거운 가상악기(옴니스피어·키스케이프·트릴리안)에서 오류창도 없이 프로그램이 꺼지던 문제를 고쳤습니다.",
+    "가상악기를 올린 상태에서 내장 신디사이저를 켜면 꺼지던 문제도 고쳤습니다.",
+    "트랙을 지웠다 다시 만들면 옛 악기·이펙트·EQ가 남아 있던 문제를 고쳤습니다.",
+    "피아노 롤 맨 위 음에 노트가 안 찍히던 문제를 고치고, 음역을 88건반(A0~C8)으로 넓혔습니다.",
+    "아무것도 고르지 않고 Delete를 눌러 트랙이 통째로 지워지던 사고를 막았습니다.",
+    "MIDI 장치를 켤 때마다 다시 고르지 않아도 됩니다 — 마지막에 쓰던 장치를 기억합니다.",
+    "트랙 [+]를 누를 때 한참 기다리던 문제: 플러그인 조사 결과를 기억해 두 번째 실행부터는 바로 열립니다.",
+    "샘플레이트·버퍼 크기를 개인설정에서 고를 수 있습니다.",
+    "MIDI 파일을 트랙 위로 끌어다 놓으면 그 트랙에 바로 들어갑니다.",
+    "트랙 뷰에 스냅과 세밀한 격자가 생겼습니다.",
+    "프로그램이 갑자기 꺼져도 기록을 남깁니다 (%LOCALAPPDATA%\\MidiPro\\crash.log).",
+    nullptr,
+};
+inline const char* const kNotes11[] = {
+    "드럼 트랙 에디터, 내장 드럼 신스, 드럼 샘플 라이브러리와 킷 저장이 생겼습니다.",
+    "MIDI 클립 — 노트를 블록으로 묶어 트랙 뷰에서 옮기고 복제합니다.",
+    "어레인지 뷰에서 구간 블록을 끌어 곡 구조를 바꿉니다.",
+    "기타 연습 트랙과 타브 악보 창, 텍스트·PDF 타브 가져오기.",
+    "내장 이펙트 5종(EQ·딜레이·리버브·컴프레서·리미터), 사이드체인 덕킹, 센드/리턴 리버브, 마스터 리미터.",
+    "카운트인, 피치 벤드 레인, CC 오토메이션, 벨로시티 도구(크레센도·랜덤).",
+    "템포 램프(점진 가속·감속), 곡 미니맵, 스윙.",
+    nullptr,
+};
+inline const char* const kNotes10[] = {
+    "최초 릴리스 — MIDI 시퀀서, 피아노 롤, 오디오 녹음(ASIO)과 클립 편집, "
+    "VST3 호스팅, 믹서, 버전 분기 트리, 내보내기(WAV/MP3/스템), 테마.",
+    nullptr,
+};
+
 inline const ReleaseNote* releaseNotes(std::size_t& count) {
     static const ReleaseNote kAll[] = {
-        {"1.3.5", kNotes135}, {"1.3.4", kNotes134}, {"1.3.3", kNotes133},
-        {"1.3.2", kNotes132}, {"1.3.1", kNotes131}, {"1.3.0", kNotes130},
+        {"1.3.6", kNotes136}, {"1.3.5", kNotes135}, {"1.3.4", kNotes134},
+        {"1.3.3", kNotes133}, {"1.3.2", kNotes132}, {"1.3.1", kNotes131},
+        {"1.3.0", kNotes130}, {"1.2.1", kNotes121}, {"1.1", kNotes11},
+        {"1.0", kNotes10},
     };
     count = sizeof(kAll) / sizeof(kAll[0]);
     return kAll;

@@ -2056,19 +2056,18 @@ void drawWhatsNew(AppState& state) {
         return;
     }
 
-    sectionHeader("MidiPro가 새로워졌습니다");
+    sectionHeader(state.whatsNewAll ? "MidiPro 변경 이력" : "MidiPro가 새로워졌습니다");
     ImGui::TextDisabled("현재 버전 %s", kAppVersion);
     ImGui::Spacing();
 
-    // 지난번에 본 버전 이후의 항목만 (처음 실행이면 최신 하나만)
-    const std::size_t show = newNoteCount(state.lastSeenVersion.c_str());
     std::size_t total = 0;
     const ReleaseNote* all = releaseNotes(total);
+    // 시작할 때 자동으로 뜬 경우엔 지난번에 본 버전 이후만, 메뉴로 연 경우엔 전부.
+    // (볼 게 없으면 전체를 보여준다 — 빈 창은 아무 도움이 안 된다)
+    std::size_t show = state.whatsNewAll ? total : newNoteCount(state.lastSeenVersion.c_str());
+    if (show == 0) show = total;
 
     ImGui::BeginChild("##wnbody", uiVec(0, -44), ImGuiChildFlags_Borders);
-    if (show == 0) {
-        ImGui::TextDisabled("새로 추가된 내용이 없습니다.");
-    }
     for (std::size_t i = 0; i < show && i < total; ++i) {
         if (i > 0) ImGui::Spacing();
         if (uiHeaderFont()) ImGui::PushFont(uiHeaderFont());
@@ -2094,7 +2093,10 @@ void drawWhatsNew(AppState& state) {
     ImGui::End();
 
     // 닫는 순간 "이 버전을 봤다"고 기록한다 (설정에 저장돼 다음엔 안 뜬다)
-    if (!state.showWhatsNew) state.lastSeenVersion = kAppVersion;
+    if (!state.showWhatsNew) {
+        state.lastSeenVersion = kAppVersion;
+        state.whatsNewAll = false; // 다음에 자동으로 뜰 땐 다시 "새 것만"
+    }
 }
 
 // ---------------------------------------------------------
@@ -2471,7 +2473,11 @@ void drawMenuBar(AppState& state, bool& openRequested, bool& saveRequested) {
         }
         if (ImGui::BeginMenu("도움말")) {
             ImGui::MenuItem("단축키", "F1", &state.showHelp);
-            ImGui::MenuItem("업데이트 내용", nullptr, &state.showWhatsNew);
+            // 메뉴로 열면 처음 버전까지 전체 이력을 보여준다
+            if (ImGui::MenuItem("업데이트 내용")) {
+                state.showWhatsNew = true;
+                state.whatsNewAll = true;
+            }
             ImGui::MenuItem("MidiPro 정보", nullptr, &state.showAbout);
             ImGui::EndMenu();
         }
