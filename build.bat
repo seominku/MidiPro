@@ -12,7 +12,7 @@ set ASIO=external\asiosdk\common\asio.cpp external\asiosdk\host\asiodrivers.cpp 
 
 set VS=external\vst3sdk
 set VSTSDK=%VS%\pluginterfaces\base\funknown.cpp %VS%\pluginterfaces\base\coreiids.cpp %VS%\pluginterfaces\base\conststringtable.cpp %VS%\pluginterfaces\base\ustring.cpp %VS%\base\source\fstring.cpp %VS%\base\source\fbuffer.cpp %VS%\base\source\fdebug.cpp %VS%\base\source\fobject.cpp %VS%\base\source\updatehandler.cpp %VS%\base\source\baseiids.cpp %VS%\base\source\fstreamer.cpp %VS%\base\source\fdynlib.cpp %VS%\base\source\timer.cpp %VS%\base\thread\source\flock.cpp %VS%\base\thread\source\fcondition.cpp %VS%\public.sdk\source\common\memorystream.cpp %VS%\public.sdk\source\common\commoniids.cpp %VS%\public.sdk\source\common\pluginview.cpp %VS%\public.sdk\source\common\commonstringconvert.cpp %VS%\public.sdk\source\common\threadchecker_win32.cpp %VS%\public.sdk\source\vst\vstinitiids.cpp %VS%\public.sdk\source\vst\utility\stringconvert.cpp %VS%\public.sdk\source\vst\hosting\module.cpp %VS%\public.sdk\source\vst\hosting\module_win32.cpp %VS%\public.sdk\source\vst\hosting\hostclasses.cpp %VS%\public.sdk\source\vst\hosting\eventlist.cpp %VS%\public.sdk\source\vst\hosting\parameterchanges.cpp %VS%\public.sdk\source\vst\hosting\processdata.cpp %VS%\public.sdk\source\vst\hosting\connectionproxy.cpp %VS%\public.sdk\source\vst\hosting\pluginterfacesupport.cpp
-set VST=src\vst\Vst3Host.cpp src\vst\PluginScanner.cpp src\vst\PluginCache.cpp %VSTSDK%
+set VST=src\vst\Vst3Host.cpp src\vst\PluginScanner.cpp src\vst\PluginCache.cpp src\vst\VstPreset.cpp %VSTSDK%
 
 set SEQ=src\sequencer\TimeBase.cpp src\sequencer\Track.cpp src\sequencer\Song.cpp src\sequencer\SmfFile.cpp src\sequencer\Player.cpp src\sequencer\TabImport.cpp
 set PDFTAB=src\pdf\PdfTab.cpp external\miniz\miniz.c
@@ -52,6 +52,8 @@ cl %CFLAGS% %INC% tests\test_project.cpp src\project\Project.cpp src\audio\Synth
 if errorlevel 1 ( echo [ERROR] project test build failed & exit /b 1 )
 cl %CFLAGS% %INC% tests\test_drumclassify.cpp /Fe:build\MidiProDrumTests.exe /Fo:build\
 if errorlevel 1 ( echo [ERROR] drum classify test build failed & exit /b 1 )
+cl %CFLAGS% %INC% tests\test_vstpreset.cpp src\vst\VstPreset.cpp /Fe:build\MidiProPresetTests.exe /Fo:build\
+if errorlevel 1 ( echo [ERROR] vst preset test build failed & exit /b 1 )
 build\MidiProTests.exe
 if errorlevel 1 ( echo [ERROR] midi tests failed & exit /b 1 )
 build\MidiProSeqTests.exe
@@ -68,6 +70,8 @@ build\MidiProProjectTests.exe
 if errorlevel 1 ( echo [ERROR] project tests failed & exit /b 1 )
 build\MidiProDrumTests.exe
 if errorlevel 1 ( echo [ERROR] drum classify tests failed & exit /b 1 )
+build\MidiProPresetTests.exe
+if errorlevel 1 ( echo [ERROR] vst preset tests failed & exit /b 1 )
 
 echo [OK] build\MidiPro.exe
 endlocal

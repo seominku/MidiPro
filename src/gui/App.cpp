@@ -20,6 +20,7 @@
 #include "audio/WavFile.h"
 #include "project/Project.h"
 #include "sequencer/SmfFile.h"
+#include "vst/VstPreset.h"
 
 #include <fstream>
 #include <sstream>
@@ -991,8 +992,65 @@ std::string App::handleControlCommand(const std::string& line) {
         return okMsg((cmd == "reload" ? "다시 불러옴: " : "열었습니다: ") + p);
     }
 
+    // ---- 플러그인 음색(프리셋) 저장/적용 ----
+    // presetsave <트랙> <슬롯> <경로> / presetload <트랙> <슬롯> <경로>
+    // 슬롯: -1 = 트랙 악기, 0 이상 = 그 번호의 트랙 이펙트
+    if (cmd == "presetsave" || cmd == "presetload") {
+        int ti = -1, slot = -1;
+        ls >> ti >> slot;
+        const std::string p = rest();
+        if (p.empty()) return fail(cmd + ": 파일 경로가 필요합니다");
+        if (ti < 0 || ti >= (int)m_state.song.tracks.size())
+            return fail("트랙 " + std::to_string(ti) + ": 그런 트랙이 없습니다");
+        if (!m_state.vst) return fail("VST 호스트가 없습니다");
+        const int ch = m_state.song.tracks[(std::size_t)ti].channel & 0x0F;
+
+        vst::Vst3Host* host = nullptr;
+        std::string what;
+        if (slot < 0) {
+            host = m_state.vst->trackInstrumentHost(ch);
+            what = "악기";
+            if (!host) return fail("이 트랙에 VST 악기가 없습니다");
+        } else {
+            if (slot >= m_state.vst->trackEffectCount(ch))
+                return fail("이 트랙에 " + std::to_string(slot) + "번 이펙트가 없습니다");
+            host = m_state.vst->trackEffectHost(ch, slot);
+            what = "이펙트 " + std::to_string(slot);
+            if (!host) return fail("그 자리는 내장 이펙트라 프리셋을 쓸 수 없습니다");
+        }
+
+        if (cmd == "presetsave") {
+            std::vector<uint8_t> bytes;
+            if (!host->saveState(bytes) || bytes.empty()) return fail("플러그인 상태를 읽지 못했습니다");
+            std::error_code ec;
+            std::filesystem::create_directories(core::pathFromUtf8(p).parent_path(), ec);
+            std::ofstream out(core::pathFromUtf8(p), std::ios::binary);
+            if (!out) return fail("파일을 만들지 못했습니다: " + p);
+            out.write((const char*)bytes.data(), (std::streamsize)bytes.size());
+            if (!out.good()) return fail("파일 쓰기 실패: " + p);
+            return okMsg("음색 저장(" + what + ", " + std::to_string(bytes.size()) + "바이트): " + p);
+        }
+
+        std::ifstream in(core::pathFromUtf8(p), std::ios::binary | std::ios::ate);
+        if (!in) return fail("파일이 없습니다: " + p);
+        const std::streamsize sz = in.tellg();
+        if (sz <= 0) return fail("빈 파일입니다: " + p);
+        in.seekg(0);
+        std::vector<uint8_t> raw((std::size_t)sz);
+        if (!in.read((char*)raw.data(), sz)) return fail("파일을 읽지 못했습니다: " + p);
+
+        std::vector<uint8_t> blob;
+        if (!vst::anyPresetToState(raw.data(), raw.size(), blob))
+            return fail("음색 파일 형식을 알 수 없습니다 (.mppreset 또는 .vstpreset)");
+        if (!host->loadState(blob.data(), blob.size()))
+            return fail("플러그인이 이 음색을 받지 않았습니다 (다른 플러그인의 프리셋일 수 있습니다)");
+        m_state.statusMessage = "음색 적용: " + p;
+        return okMsg("음색 적용(" + what + "): " + p);
+    }
+
     return fail("모르는 명령: " + cmd +
-                " (쓸 수 있는 것: ping status play stop toggle rewind seek tempo save open reload)");
+                " (쓸 수 있는 것: ping status play stop toggle rewind seek tempo save open "
+                "reload presetsave presetload)");
 }
 
 // ---------------------------------------------------------

@@ -1571,6 +1571,85 @@ const TOOLS = {
         },
     },
 
+    // --- 플러그인 음색(프리셋) ---------------------------------------------
+    midipro_preset: {
+        description:
+            '트랙에 얹은 VST 플러그인의 음색(프리셋)을 저장하거나 적용한다. 실행 중인 앱이 필요하다.\n' +
+            'save = 지금 그 플러그인의 음색을 이름 붙여 보관 (앱에서 손으로 만든 톤을 재사용할 수 있다)\n' +
+            'load = 보관한 음색이나 .vstpreset 파일을 그 트랙에 적용\n' +
+            'list = 보관된 음색 목록\n' +
+            '※ MCP가 음색을 "만들어" 내지는 못한다 — 플러그인 내부 데이터라 한 번은 앱에서 손으로 잡아야 한다.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                action: { type: 'string', enum: ['save', 'load', 'list'] },
+                track: { type: 'integer', description: '트랙 번호 (0부터). save/load에 필요' },
+                slot: {
+                    type: 'integer',
+                    description: '-1 = 트랙 악기(기본), 0 이상 = 그 번호의 트랙 이펙트',
+                },
+                name: { type: 'string', description: '보관할/불러올 음색 이름 (예: "메탈 리드")' },
+                file: { type: 'string', description: 'name 대신 파일 경로를 직접 (.mppreset / .vstpreset)' },
+            },
+            required: ['action'],
+        },
+        run(args) {
+            const dir = path.join(dataDir(), 'presets');
+            const a = String(args.action);
+            if (a === 'list') {
+                mkdirSync(dir, { recursive: true });
+                const mine = readdirSync(dir, { withFileTypes: true })
+                    .filter((e) => e.isFile() && /\.mppreset$/i.test(e.name))
+                    .map((e) => ({ name: e.name.replace(/\.mppreset$/i, ''), path: path.join(dir, e.name) }));
+                // 표준 .vstpreset 위치도 훑는다 (다른 프로그램에서 내보낸 것)
+                const std = [];
+                for (const root of [
+                    path.join(process.env.USERPROFILE ?? '', 'Documents', 'VST3 Presets'),
+                    path.join(process.env.PROGRAMDATA ?? '', 'VST3 Presets'),
+                    path.join(process.env.APPDATA ?? '', 'VST3 Presets'),
+                ]) {
+                    if (!root || !existsSync(root)) continue;
+                    const walk = (d, depth) => {
+                        if (depth > 4) return;
+                        let ents;
+                        try { ents = readdirSync(d, { withFileTypes: true }); } catch { return; }
+                        for (const e of ents) {
+                            const full = path.join(d, e.name);
+                            if (e.isDirectory()) walk(full, depth + 1);
+                            else if (/\.vstpreset$/i.test(e.name))
+                                std.push({ name: path.basename(e.name, path.extname(e.name)), path: full });
+                        }
+                    };
+                    walk(root, 0);
+                }
+                return JSON.stringify({
+                    presetDir: dir,
+                    saved: mine,
+                    vstPresets: std.slice(0, 200),
+                    note: mine.length || std.length ? undefined
+                        : '보관된 음색이 없습니다. 앱에서 플러그인 음색을 잡은 뒤 action="save"로 보관하세요.',
+                }, null, 2);
+            }
+
+            const ti = requireNum(args.track, 'track', { min: 0 });
+            const slot = args.slot === undefined ? -1 : requireNum(args.slot, 'slot', { min: -1 });
+            let file = args.file ? path.resolve(String(args.file)) : null;
+            if (!file) {
+                if (!args.name) throw new Error('name 또는 file 중 하나가 필요합니다');
+                const safe = String(args.name).replace(/[\\/:*?"<>|]/g, '_');
+                file = path.join(dir, safe + '.mppreset');
+            }
+            if (a === 'save') mkdirSync(path.dirname(file), { recursive: true });
+            else if (!existsSync(file)) throw new Error(`음색 파일이 없습니다: ${file}`);
+
+            const r = controlSend(`${a === 'save' ? 'presetsave' : 'presetload'} ${ti} ${slot} ${file}`);
+            if (!r.ok) throw new Error(r.error ?? '앱이 명령을 거부했습니다');
+            return (r.message ?? '완료') +
+                   (a === 'save' ? '\n※ 이 음색은 다른 프로젝트에서도 load로 쓸 수 있습니다.'
+                                 : '\n※ 프로젝트에 남기려면 midipro_transport(action="save")로 저장하세요.');
+        },
+    },
+
     // --- 앱으로 열기 -----------------------------------------------------
     midipro_open: {
         description:

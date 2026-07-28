@@ -48,6 +48,7 @@ MidiPro 실행 파일은 이 순서로 찾습니다:
 | `midipro_import_midi` | `.mid` 파일 가져오기 (새 트랙들로 또는 한 트랙에 합치기) |
 | `midipro_export_midi` | 프로젝트를 표준 `.mid`(포맷 1)로 내보내기 |
 | `midipro_transport` | **실행 중인 앱 조종** (재생/정지/시크/템포/상태/저장/다시 불러오기) |
+| `midipro_preset` | 플러그인 음색 보관·적용 (`.mppreset` / `.vstpreset`) |
 | `midipro_open` | 만든 프로젝트를 MidiPro로 열기 |
 | `midipro_status` | 설치·실행 상태, 스캔된 VST3 목록, 최근 프로젝트 |
 
@@ -118,6 +119,26 @@ midipro_transport  action="open"   path=...
 명령은 앱의 **UI 스레드**가 프레임마다 실행합니다 — 버튼을 누른 것과 같은
 경로라 오디오가 꼬이지 않습니다. 앱이 대화상자에 막혀 있으면 5초 뒤 그 사실을
 알려줍니다. 통로를 끄려면 `settings.ini`의 `control_pipe 0`(앱 재시작 필요).
+
+## 플러그인 음색 (앱 1.3.3 이상)
+
+```
+midipro_preset  action="save"  track=0  name="메탈 리드"   -> 지금 그 트랙 악기의 음색을 보관
+midipro_preset  action="load"  track=1  name="메탈 리드"   -> 다른 트랙에 그대로 적용
+midipro_preset  action="load"  track=0  file="...\Foo.vstpreset"
+midipro_preset  action="list"                              -> 보관함 + 표준 .vstpreset 목록
+```
+
+`slot`으로 자리를 고릅니다: `-1`(기본) = 트랙 악기, `0` 이상 = 그 번호의 트랙 이펙트.
+보관함은 `%LOCALAPPDATA%\MidiPro\presets`입니다.
+
+**한계 — 솔직히**: MCP가 음색을 *만들어* 내지는 못합니다. 음색은 플러그인 내부
+데이터라 한 번은 앱에서 손으로 잡아야 합니다. 대신 한 번 잡아 두면 그 뒤로는
+"이 트랙에 그 톤 얹어줘"가 자동으로 됩니다. Surge XT 같은 플러그인의 자체 패치
+(`.fxp`)는 형식이 달라 아직 못 읽습니다.
+
+적용한 음색을 프로젝트에 남기려면 `midipro_transport action="save"`로 저장하세요
+(앱이 플러그인 상태를 프로젝트 옆 사이드카에 함께 저장합니다).
 
 ## 드럼 샘플 자동 배정
 

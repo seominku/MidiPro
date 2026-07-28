@@ -91,7 +91,7 @@ try {
 
     const list = await c.request('tools/list', {});
     const names = (list.result?.tools ?? []).map((t) => t.name);
-    check(names.length === 16, `도구 16개를 노출한다 (실제 ${names.length}개)`);
+    check(names.length === 17, `도구 17개를 노출한다 (실제 ${names.length}개)`);
     check(names.every((n) => n.startsWith('midipro_')), '도구 이름이 모두 midipro_ 로 시작한다');
     check((list.result?.tools ?? []).every((t) => t.inputSchema?.type === 'object'),
           '모든 도구가 object 스키마를 갖는다');
@@ -612,6 +612,22 @@ try {
     check(r.isError && /20~400|bpm/.test(r.text), 'tempo 범위를 잡는다');
     r = await c.call('midipro_transport', { action: 'open', path: path.join(dir, 'nope.midipro') });
     check(r.isError && /파일이 없습니다/.test(r.text), 'open에 없는 파일을 잡는다');
+
+    // 프리셋: 파일/인자 검사는 앱 없이도 확인된다
+    const cp = new Client({ MIDIPRO_DATA_DIR: path.join(dir, 'PresetData') });
+    await cp.request('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'p', version: '1' } });
+    r = await cp.call('midipro_preset', { action: 'list' });
+    const pl = JSON.parse(r.text);
+    check(!r.isError && Array.isArray(pl.saved) && pl.saved.length === 0,
+          '보관된 음색이 없으면 빈 목록');
+    check(/보관된 음색이 없습니다/.test(pl.note ?? ''), '비어 있으면 어떻게 하는지 알려준다');
+    r = await cp.call('midipro_preset', { action: 'save', track: 0 });
+    check(r.isError && /name 또는 file/.test(r.text), 'save에 이름이 없으면 잡는다');
+    r = await cp.call('midipro_preset', { action: 'load', track: 0, name: '없는음색' });
+    check(r.isError && /음색 파일이 없습니다/.test(r.text), 'load에 없는 음색을 잡는다');
+    r = await cp.call('midipro_preset', { action: 'save', name: 'x' });
+    check(r.isError && /track/.test(r.text), 'track이 없으면 잡는다');
+    cp.close();
 
     const tt = (list.result?.tools ?? []).find((t) => t.name === 'midipro_transport');
     check(tt && tt.inputSchema.properties.action.enum.includes('reload'),
